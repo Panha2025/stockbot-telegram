@@ -1,0 +1,2 @@
+# Only needed for the Telegram interface. The CLI uses Python's standard library.
+python-telegram-bot>=22.0,<23.0

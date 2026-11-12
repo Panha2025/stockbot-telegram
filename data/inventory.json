@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "next_id": 11,
+  "products": [
+    {
+      "id": "P001",
+      "name": "Rice 5kg",
+      "category": "Groceries",
+      "quantity": 12,
+      "price": "13.50"
+    },
+    {
+      "id": "P002",
+      "name": "Cooking oil 1L",
+      "category": "Groceries",
+      "quantity": 4,
+      "price": "3.75"
+    },
+    {
+      "id": "P003",
+      "name": "Instant noodle pack",
+      "category": "Groceries",
+      "quantity": 25,
+      "price": "1.20"
+    },
+    {
+      "id": "P004",
+      "name": "Notebook A5",
+      "category": "Stationery",
+      "quantity": 18,
+      "price": "2.25"
+    },
+    {
+      "id": "P005",
+      "name": "Blue pen",
+      "category": "Stationery",
+      "quantity": 40,
+      "price": "0.50"
+    },
+    {
+      "id": "P006",
+      "name": "Hand soap",
+      "category": "Personal Care",
+      "quantity": 3,
+      "price": "2.80"
+    },
+    {
+      "id": "P007",
+      "name": "Shampoo 200ml",
+      "category": "Personal Care",
+      "quantity": 0,
+      "price": "4.50"
+    },
+    {
+      "id": "P008",
+      "name": "Bottled water 1L",
+      "category": "Beverages",
+      "quantity": 30,
+      "price": "0.60"
+    },
+    {
+      "id": "P009",
+      "name": "Coffee sachet box",
+      "category": "Beverages",
+      "quantity": 7,
+      "price": "5.00"
+    },
+    {
+      "id": "P010",
+      "name": "AA batteries pack",
+      "category": "Household",
+      "quantity": 6,
+      "price": "3.40"
+    }
+  ]
+}
