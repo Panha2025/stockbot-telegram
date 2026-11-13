@@ -19,7 +19,7 @@ from bot_helpers import (
 )
 from inventory import InventoryError, InventoryManager, Product
 from storage import DataFileError, InventoryStorage
-from postgres_storage import PostgresInventoryManager
+from telegram_storage import LocalTelegramInventoryManager
 
 try:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -64,10 +64,6 @@ EDIT_KEYS = ("edit_id", "edit_field", "edit_nonce", "edit_return")
 DELETE_KEYS = ("delete_id", "delete_nonce", "delete_return")
 ACCOUNT_DELETE_KEY = "delete_account_nonce"
 RATE_LIMIT_PER_MINUTE = 60
-
-
-class ExistingWebhookError(RuntimeError):
-    """Polling would remove a pre-existing webhook; require owner action first."""
 
 
 class BotIdentityError(RuntimeError):
@@ -224,7 +220,7 @@ async def delete_account_start(update, context):
     await reply(
         update,
         "⚠️ PERMANENT ACCOUNT DELETION\n\n"
-        "This permanently deletes every product in your cloud inventory. "
+        "This permanently deletes every product in your local inventory file for this Telegram account. "
         "This cannot be undone. Confirm only if you want to erase your account data.",
         InlineKeyboardMarkup([
             [button("🗑️ Permanently Delete My Account", f"account:delete:{nonce}")],
@@ -270,7 +266,7 @@ async def admin_status(update, context):
     except Exception as exc:
         LOG.error("Admin health check failed (%s)", type(exc).__name__)
         healthy = False
-    await reply(update, "StockBot database: healthy." if healthy else "StockBot database: unavailable.")
+    await reply(update, "StockBot is running locally." if healthy else "StockBot is not responding correctly.")
 
 
 async def home(update, context):
@@ -314,7 +310,7 @@ async def help_command(update, context):
         "/search — find products   /update or /edit — edit product\n"
         "/delete — delete safely   /summary — inventory report\n"
         "/cancel — cancel an unfinished operation\n"
-        "/deleteaccount — permanently erase your cloud inventory (confirmation required)",
+        "/deleteaccount — permanently erase your local inventory file (confirmation required)",
         main_keyboard(),
     )
 
@@ -1004,7 +1000,6 @@ async def unknown(update, context):
 
 async def error_handler(update, context):
     error = context.error
-    context.application.bot_data["_webhook_handler_error"] = True
     LOG.error("Telegram update failed (%s)", type(error).__name__)
     if update and update.effective_message:
         try:
@@ -1021,11 +1016,9 @@ async def preflight_telegram(application):
         )
     webhook = await application.bot.get_webhook_info()
     if webhook.url:
-        raise ExistingWebhookError(
-            "A Telegram webhook is currently configured. Polling would remove it, so the bot stopped safely. "
-            "Review it and remove it yourself only if you intend to switch to polling."
-        )
-    LOG.info("Telegram identity verified as @%s; no webhook is configured", bot_info.username)
+        await application.bot.delete_webhook(drop_pending_updates=False)
+        LOG.info("Removed the previous webhook; pending updates were preserved for local polling")
+    LOG.info("Telegram identity verified as @%s; local polling is ready", bot_info.username)
 
 
 async def log_incoming_command(update, context):
@@ -1036,12 +1029,10 @@ async def log_incoming_command(update, context):
         LOG.info("Received /%s", match.group(1).lower())
 
 
-def build_application(token, allowed_ids, stock, access_mode="restricted", admin_ids=None, persistence=None):
+def build_application(token, allowed_ids, stock, access_mode="restricted", admin_ids=None):
     if access_mode == "public" and not hasattr(stock, "for_user"):
-        raise ValueError("Public mode requires user-scoped PostgreSQL storage")
+        raise ValueError("Public mode requires user-scoped local JSON storage")
     builder = Application.builder().token(token).concurrent_updates(False).post_init(preflight_telegram)
-    if persistence is not None:
-        builder = builder.persistence(persistence)
     application = builder.build()
     application.bot_data["manager"] = stock
     application.bot_data["allowed_ids"] = allowed_ids
@@ -1108,8 +1099,7 @@ def build_application(token, allowed_ids, stock, access_mode="restricted", admin
             per_chat=True,
             per_user=True,
             per_message=False,
-            persistent=persistence is not None,
-            name="stockbot_user_conversation" if persistence is not None else None,
+            persistent=False,
         )
     application.add_handler(TypeHandler(Update, log_incoming_command), group=-1)
     application.add_handler(TypeHandler(Update, rate_limit_update), group=-2)
@@ -1150,78 +1140,40 @@ def main():
     LOG.setLevel(logging.INFO)
     config = load_env_file(BASE / ".env")
     token, _ = resolve_config_value("TELEGRAM_BOT_TOKEN", config)
-    raw_ids, id_source = resolve_config_value(
-        "TELEGRAM_ALLOWED_USER_IDS", config, aliases=("TELEGRAM_ALLOWED_IDS",)
-    )
     raw_low_stock_limit, low_source = resolve_config_value("LOW_STOCK_LIMIT", config, default="5")
-    file_name, path_source = resolve_config_value("INVENTORY_DATA_PATH", config)
-    access_mode, access_source = resolve_config_value("BOT_ACCESS_MODE", config, default="restricted")
-    backend, backend_source = resolve_config_value("STORAGE_BACKEND", config, default="json")
-    database_url, _ = resolve_config_value("DATABASE_URL", config)
-    ssl_root_cert, cert_source = resolve_config_value("DATABASE_SSL_ROOT_CERT", config)
     raw_admin_ids, admin_source = resolve_config_value("TELEGRAM_ADMIN_USER_IDS", config)
+    # The local polling bot is intentionally public: private inventory files
+    # are separated by verified Telegram user ID. An old database/allowlist value
+    # in .env cannot silently change that behavior or require a database.
+    access_mode, access_source = "public", "local configuration"
+    allowed_ids = set()
     if not token or token == "PASTE_YOUR_BOT_TOKEN_HERE":
         print("Missing TELEGRAM_BOT_TOKEN. Follow README.md to configure .env.")
         return 1
     try:
-        if access_mode not in {"public", "restricted"}:
-            raise ValueError("BOT_ACCESS_MODE must be public or restricted")
-        if backend not in {"json", "postgres"}:
-            raise ValueError("STORAGE_BACKEND must be json or postgres")
-        if access_mode == "public" and backend != "postgres":
-            raise ValueError("Public access requires PostgreSQL storage to keep each user's inventory private")
-        allowed_ids = parse_allowed_ids(raw_ids) if access_mode == "restricted" else set()
         admin_ids = parse_allowed_ids(raw_admin_ids)
         low_stock_limit = int(raw_low_stock_limit)
         if low_stock_limit < 0:
             raise ValueError("LOW_STOCK_LIMIT must be zero or greater")
-        if backend == "postgres":
-            if not database_url:
-                raise ValueError("DATABASE_URL is required when STORAGE_BACKEND=postgres")
-            if not ssl_root_cert:
-                raise ValueError("DATABASE_SSL_ROOT_CERT must point to Supabase's downloaded root certificate")
-            cert_path = Path(ssl_root_cert).expanduser()
-            if not cert_path.is_absolute():
-                cert_path = BASE / cert_path
-            if not cert_path.is_file():
-                raise ValueError("DATABASE_SSL_ROOT_CERT file was not found")
-            stock = PostgresInventoryManager(
-                database_url, low_stock_limit=low_stock_limit, ssl_root_cert=cert_path,
-            )
-            if not stock.check_connection():
-                raise ValueError("PostgreSQL health check failed")
-        else:
-            data_path = Path(file_name).expanduser() if file_name else DEFAULT_DATA
-            if not data_path.is_absolute():
-                data_path = BASE / data_path
-            stock = InventoryManager(InventoryStorage(data_path), low_stock_limit=low_stock_limit)
+        stock = LocalTelegramInventoryManager(
+            BASE / "data" / "telegram_users", low_stock_limit=low_stock_limit,
+        )
     except (ValueError, DataFileError) as exc:
         print(f"Cannot start safely: {exc}")
         return 1
     except Exception as exc:
         LOG.error("Storage initialization failed (%s)", type(exc).__name__)
-        print("Cannot start safely: storage initialization failed. Check database setup and credentials privately.")
+        print("Cannot start safely: local inventory storage could not be initialized. Check file permissions.")
         return 1
-    if access_mode == "restricted" and not allowed_ids:
-        print("Access locked: TELEGRAM_ALLOWED_USER_IDS is empty. /myid remains available to unlock inventory.")
     LOG.info("Access mode loaded from %s: %s", access_source, access_mode)
-    if access_mode == "restricted":
-        LOG.info("Loaded allowlist from %s (%d ID(s))", id_source, len(allowed_ids))
-    LOG.info("Loaded storage backend from %s: %s", backend_source, backend)
-    if backend == "postgres":
-        LOG.info("Verified database TLS using root certificate from %s", cert_source)
+    LOG.info("Telegram inventories use separate local JSON files")
     LOG.info("Loaded low-stock limit from %s; admin IDs from %s (%d configured)", low_source, admin_source, len(admin_ids))
-    if backend == "json":
-        LOG.info("Loaded local inventory path from %s", path_source)
     application = build_application(token, allowed_ids, stock, access_mode, admin_ids)
     print("Starting Telegram checks and polling. Press Ctrl+C to stop.")
     try:
         application.run_polling(drop_pending_updates=False, allowed_updates=["message", "callback_query"])
     except InvalidToken:
         print("Invalid TELEGRAM_BOT_TOKEN. Check it privately with BotFather; the token was not logged.")
-        return 1
-    except ExistingWebhookError as exc:
-        print(exc)
         return 1
     except BotIdentityError as exc:
         print(f"Bot identity check failed: {exc}")

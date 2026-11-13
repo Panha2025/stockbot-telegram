@@ -127,21 +127,27 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(telegram_bot.manager(self.context), ("scoped", 123))
 
     async def test_public_application_refuses_shared_local_json_storage(self):
-        with self.assertRaisesRegex(ValueError, "user-scoped PostgreSQL"):
+        with self.assertRaisesRegex(ValueError, "user-scoped local JSON"):
             telegram_bot.build_application("placeholder", set(), self.manager, access_mode="public")
 
-    async def test_public_configuration_rejects_json_backend(self):
+    async def test_public_startup_ignores_old_database_settings(self):
         output = StringIO()
+        application = types.SimpleNamespace(run_polling=unittest.mock.Mock())
         with patch.dict("os.environ", {
             "TELEGRAM_BOT_TOKEN": "dummy-test-value",
-            "BOT_ACCESS_MODE": "public",
-            "STORAGE_BACKEND": "json",
+            "BOT_ACCESS_MODE": "restricted",
+            "STORAGE_BACKEND": "postgres",
+            "DATABASE_URL": "stale-value-that-must-not-be-used",
         }, clear=True), patch.object(telegram_bot, "load_env_file", return_value={}), \
+             patch.object(telegram_bot, "build_application", return_value=application) as build, \
              contextlib.redirect_stdout(output):
             result = telegram_bot.main()
-        self.assertEqual(result, 1)
-        self.assertIn("Public access requires PostgreSQL", output.getvalue())
+        self.assertEqual(result, 0)
+        self.assertEqual(build.call_args.args[3], "public")
+        self.assertTrue(str(build.call_args.args[2].directory).endswith("telegram_users"))
+        application.run_polling.assert_called_once()
         self.assertNotIn("dummy-test-value", output.getvalue())
+        self.assertNotIn("stale-value-that-must-not-be-used", output.getvalue())
 
     async def test_global_rate_limit_covers_each_user_update(self):
         update = types.SimpleNamespace(update_id=None)
@@ -333,19 +339,20 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
         callback_data = [button.callback_data for row in keyboard for button in row]
         self.assertIn("item:stock:P001:low:0", callback_data)
 
-    async def test_startup_preflight_is_read_only_and_checks_bot_and_webhook(self):
+    async def test_startup_preflight_removes_old_webhook_and_preserves_pending_updates(self):
         bot = types.SimpleNamespace(
             get_me=AsyncMock(return_value=types.SimpleNamespace(username="SmallShopInventory221Bot")),
             get_webhook_info=AsyncMock(return_value=types.SimpleNamespace(url="")),
+            delete_webhook=AsyncMock(),
         )
         await telegram_bot.preflight_telegram(types.SimpleNamespace(bot=bot))
         bot.get_me.assert_awaited_once()
         bot.get_webhook_info.assert_awaited_once()
-        self.assertFalse(hasattr(bot, "delete_webhook"))
+        bot.delete_webhook.assert_not_awaited()
 
         bot.get_webhook_info.return_value = types.SimpleNamespace(url="https://example.invalid/hook")
-        with self.assertRaises(telegram_bot.ExistingWebhookError):
-            await telegram_bot.preflight_telegram(types.SimpleNamespace(bot=bot))
+        await telegram_bot.preflight_telegram(types.SimpleNamespace(bot=bot))
+        bot.delete_webhook.assert_awaited_once_with(drop_pending_updates=False)
 
     async def test_preflight_rejects_a_token_for_another_bot(self):
         bot = types.SimpleNamespace(
