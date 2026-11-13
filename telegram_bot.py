@@ -1146,6 +1146,7 @@ def main():
     access_mode, access_source = resolve_config_value("BOT_ACCESS_MODE", config, default="restricted")
     backend, backend_source = resolve_config_value("STORAGE_BACKEND", config, default="json")
     database_url, _ = resolve_config_value("DATABASE_URL", config)
+    ssl_root_cert, cert_source = resolve_config_value("DATABASE_SSL_ROOT_CERT", config)
     raw_admin_ids, admin_source = resolve_config_value("TELEGRAM_ADMIN_USER_IDS", config)
     if not token or token == "PASTE_YOUR_BOT_TOKEN_HERE":
         print("Missing TELEGRAM_BOT_TOKEN. Follow README.md to configure .env.")
@@ -1165,7 +1166,16 @@ def main():
         if backend == "postgres":
             if not database_url:
                 raise ValueError("DATABASE_URL is required when STORAGE_BACKEND=postgres")
-            stock = PostgresInventoryManager(database_url, low_stock_limit=low_stock_limit)
+            if not ssl_root_cert:
+                raise ValueError("DATABASE_SSL_ROOT_CERT must point to Supabase's downloaded root certificate")
+            cert_path = Path(ssl_root_cert).expanduser()
+            if not cert_path.is_absolute():
+                cert_path = BASE / cert_path
+            if not cert_path.is_file():
+                raise ValueError("DATABASE_SSL_ROOT_CERT file was not found")
+            stock = PostgresInventoryManager(
+                database_url, low_stock_limit=low_stock_limit, ssl_root_cert=cert_path,
+            )
             if not stock.check_connection():
                 raise ValueError("PostgreSQL health check failed")
         else:
@@ -1186,6 +1196,8 @@ def main():
     if access_mode == "restricted":
         LOG.info("Loaded allowlist from %s (%d ID(s))", id_source, len(allowed_ids))
     LOG.info("Loaded storage backend from %s: %s", backend_source, backend)
+    if backend == "postgres":
+        LOG.info("Verified database TLS using root certificate from %s", cert_source)
     LOG.info("Loaded low-stock limit from %s; admin IDs from %s (%d configured)", low_source, admin_source, len(admin_ids))
     if backend == "json":
         LOG.info("Loaded local inventory path from %s", path_source)

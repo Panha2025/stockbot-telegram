@@ -1,5 +1,7 @@
--- Run as the Supabase database owner in the SQL editor.
--- The bot connects as a separate, non-owner role and is subject to RLS.
+-- Safe to rerun. Run as the Supabase database owner in SQL Editor.
+-- This migration never drops tables, rows, roles, indexes, or policies.
+BEGIN;
+
 CREATE TABLE IF NOT EXISTS public.shop_users (
     telegram_user_id bigint PRIMARY KEY CHECK (telegram_user_id > 0),
     next_product_number bigint NOT NULL DEFAULT 1 CHECK (next_product_number > 0),
@@ -30,21 +32,112 @@ ALTER TABLE public.shop_users FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.shop_products ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.shop_products FORCE ROW LEVEL SECURITY;
 
-DROP POLICY IF EXISTS shop_users_owner_policy ON public.shop_users;
-CREATE POLICY shop_users_owner_policy ON public.shop_users
-    USING (telegram_user_id = nullif(current_setting('app.telegram_user_id', true), '')::bigint)
-    WITH CHECK (telegram_user_id = nullif(current_setting('app.telegram_user_id', true), '')::bigint);
-DROP POLICY IF EXISTS shop_products_owner_policy ON public.shop_products;
-CREATE POLICY shop_products_owner_policy ON public.shop_products
-    USING (telegram_user_id = nullif(current_setting('app.telegram_user_id', true), '')::bigint)
-    WITH CHECK (telegram_user_id = nullif(current_setting('app.telegram_user_id', true), '')::bigint);
+-- A different role name avoids altering or granting access to any pre-existing
+-- stockbot_app role. The runtime role is created without a password; set it
+-- later using psql's interactive \password command.
+DO $$
+DECLARE
+    role_attrs record;
+BEGIN
+    SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolinherit,
+           rolreplication, rolbypassrls
+      INTO role_attrs
+      FROM pg_roles
+     WHERE rolname = 'stockbot_runtime';
 
--- Replace the password before running this statement. Keep it server-side.
-DO $$ BEGIN
-    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'stockbot_app') THEN
-        EXECUTE format('CREATE ROLE stockbot_app LOGIN PASSWORD %L', 'REPLACE_WITH_A_LONG_RANDOM_PASSWORD');
+    IF NOT FOUND THEN
+        EXECUTE 'CREATE ROLE stockbot_runtime LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS';
+    ELSIF NOT role_attrs.rolcanlogin
+       OR role_attrs.rolsuper
+       OR role_attrs.rolcreatedb
+       OR role_attrs.rolcreaterole
+       OR role_attrs.rolinherit
+       OR role_attrs.rolreplication
+       OR role_attrs.rolbypassrls THEN
+        RAISE EXCEPTION 'Existing stockbot_runtime role has unexpected privileges; inspect it before continuing';
     END IF;
-END $$;
-GRANT USAGE ON SCHEMA public TO stockbot_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.shop_users, public.shop_products TO stockbot_app;
-REVOKE ALL ON public.shop_users, public.shop_products FROM anon, authenticated;
+
+    IF EXISTS (
+        SELECT 1
+          FROM pg_auth_members AS membership
+          JOIN pg_roles AS parent_role ON parent_role.oid = membership.roleid
+          JOIN pg_roles AS member_role ON member_role.oid = membership.member
+         WHERE member_role.rolname = 'stockbot_runtime'
+            OR parent_role.rolname = 'stockbot_runtime'
+    ) THEN
+        RAISE EXCEPTION 'Existing stockbot_runtime has role memberships; inspect them before continuing';
+    END IF;
+END;
+$$;
+
+-- Do not silently coexist with additional policies: permissive policies are
+-- ORed together and could accidentally widen access.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_policies
+         WHERE schemaname = 'public' AND tablename = 'shop_users'
+           AND policyname <> 'shop_users_owner_policy'
+    ) OR EXISTS (
+        SELECT 1 FROM pg_policies
+         WHERE schemaname = 'public' AND tablename = 'shop_products'
+           AND policyname <> 'shop_products_owner_policy'
+    ) THEN
+        RAISE EXCEPTION 'Unexpected policy exists on StockBot tables; inspect policies before continuing';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM pg_policies
+         WHERE schemaname = 'public' AND tablename = 'shop_users'
+           AND policyname = 'shop_users_owner_policy' AND (permissive <> 'PERMISSIVE' OR cmd <> 'ALL')
+    ) OR EXISTS (
+        SELECT 1 FROM pg_policies
+         WHERE schemaname = 'public' AND tablename = 'shop_products'
+           AND policyname = 'shop_products_owner_policy' AND (permissive <> 'PERMISSIVE' OR cmd <> 'ALL')
+    ) THEN
+        RAISE EXCEPTION 'Existing StockBot owner policy is restrictive; inspect it before continuing';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM pg_policies
+         WHERE schemaname = 'public' AND tablename = 'shop_users'
+           AND policyname = 'shop_users_owner_policy'
+    ) THEN
+        EXECUTE $policy$
+            ALTER POLICY shop_users_owner_policy ON public.shop_users TO public
+            USING (telegram_user_id = nullif(current_setting('app.telegram_user_id', true), '')::bigint)
+            WITH CHECK (telegram_user_id = nullif(current_setting('app.telegram_user_id', true), '')::bigint)
+        $policy$;
+    ELSE
+        EXECUTE $policy$
+            CREATE POLICY shop_users_owner_policy ON public.shop_users TO public
+            USING (telegram_user_id = nullif(current_setting('app.telegram_user_id', true), '')::bigint)
+            WITH CHECK (telegram_user_id = nullif(current_setting('app.telegram_user_id', true), '')::bigint)
+        $policy$;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM pg_policies
+         WHERE schemaname = 'public' AND tablename = 'shop_products'
+           AND policyname = 'shop_products_owner_policy'
+    ) THEN
+        EXECUTE $policy$
+            ALTER POLICY shop_products_owner_policy ON public.shop_products TO public
+            USING (telegram_user_id = nullif(current_setting('app.telegram_user_id', true), '')::bigint)
+            WITH CHECK (telegram_user_id = nullif(current_setting('app.telegram_user_id', true), '')::bigint)
+        $policy$;
+    ELSE
+        EXECUTE $policy$
+            CREATE POLICY shop_products_owner_policy ON public.shop_products TO public
+            USING (telegram_user_id = nullif(current_setting('app.telegram_user_id', true), '')::bigint)
+            WITH CHECK (telegram_user_id = nullif(current_setting('app.telegram_user_id', true), '')::bigint)
+        $policy$;
+    END IF;
+END;
+$$;
+
+GRANT USAGE ON SCHEMA public TO stockbot_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.shop_users, public.shop_products TO stockbot_runtime;
+REVOKE ALL ON public.shop_users, public.shop_products FROM PUBLIC, anon, authenticated;
+
+COMMIT;

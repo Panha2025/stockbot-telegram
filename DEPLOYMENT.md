@@ -10,11 +10,94 @@ You need owner access to a Supabase project and a Render account. Creating a pai
 
 ## 1. Create the database and role
 
-1. Create a Supabase PostgreSQL project. Choose a nearby region and save the database owner's password privately.
-2. In Supabase **SQL Editor**, open `migrations/001_public_inventory.sql`.
-3. Before running it, replace the literal `REPLACE_WITH_A_LONG_RANDOM_PASSWORD` in the `CREATE ROLE` statement with a freshly generated, unique password. Never commit this edited migration. Run it as the project database owner.
-4. In Supabase **Project Settings → Database → Connection string**, copy the PostgreSQL URI for the `stockbot_app` role. Use SSL; the application enforces `sslmode=require`. URL-encode special characters in the password when assembling a URI.
-5. Store that URI only as Render's `DATABASE_URL`. Do not use the Supabase `service_role` API key. The database role has no table ownership or `BYPASSRLS`, and PostgreSQL row-level policies require the transaction-local verified Telegram ID set by the bot.
+1. Keep the project-owner password separate from the bot's app-role password. In Supabase **Project Settings → Database → SSL Configuration**, download the database root certificate and save it locally.
+2. First run the **read-only audit query** below in a new Supabase SQL Editor query. The previous failed migration may have left some objects in place, depending on how the SQL Editor transaction was handled. Review the role output: the revised migration deliberately ignores `stockbot_app` and uses a separate `stockbot_runtime` role. Do not reuse or alter an existing role reported as elevated.
+3. If the audit shows no `stockbot_runtime` role, or shows that it is a login role with no elevated flags and no memberships, paste the full `migrations/001_public_inventory.sql` into a new SQL Editor query and click **Run**. The script is safe to rerun: it uses `IF NOT EXISTS`, creates or corrects only the named owner policies, and performs no drops or row deletes. It aborts if it finds an unexpected policy or an unsafe pre-existing `stockbot_runtime` role. If it aborts, stop and inspect the audit results rather than changing or deleting database objects.
+4. Set the app-role password interactively so it never appears in SQL source, browser query history, or the shell command. On your Mac, use `psql` with the direct connection details from Supabase **Connect** (or its **Session pooler** details if direct IPv6 is unavailable). Run `psql 'host=<HOST_FROM_CONNECT> port=<PORT_FROM_CONNECT> dbname=postgres user=<OWNER_USERNAME_FROM_CONNECT> sslmode=verify-full sslrootcert=<LOCAL_ROOT_CERT_PATH>'`. This command contains no password; `psql` prompts for the project owner's password. At the `psql` prompt, run `\password stockbot_runtime`, enter a freshly generated long random password from your password manager when prompted, then enter it again to confirm. Save it in that password manager and type `\q` to exit. The `\password` prompt hides the new value and keeps it out of command history.
+5. In Supabase **Connect**, choose **Session pooler** for a Render worker on an IPv4-only network. Copy the complete URI and substitute the custom-role username `stockbot_runtime.<PROJECT_REF>` and the app-role password. Use the pooler host and port exactly as shown. Percent-encode any reserved characters in the password for the URI.
+6. In Render, open the worker's **Environment** page, choose **Add Secret File**, set the filename to `supabase-ca.crt`, and paste in the downloaded root certificate file contents. Set `DATABASE_SSL_ROOT_CERT` to `/etc/secrets/supabase-ca.crt`. Store the completed URI only in Render's `DATABASE_URL` secret. The app verifies the server certificate with `sslmode=verify-full`. Do not use the Supabase `service_role` API key or the project-owner database password. The runtime role has no table ownership or `BYPASSRLS`, and PostgreSQL row-level policies require the transaction-local verified Telegram ID set by the bot.
+
+### Read-only check before migration
+
+```sql
+SELECT table_name
+FROM information_schema.tables
+WHERE table_schema = 'public'
+  AND table_name IN ('shop_users', 'shop_products')
+ORDER BY table_name;
+
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class AS c
+JOIN pg_namespace AS n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('shop_users', 'shop_products')
+ORDER BY c.relname;
+
+SELECT rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole,
+       rolinherit, rolreplication, rolbypassrls
+FROM pg_roles
+WHERE rolname IN ('stockbot_app', 'stockbot_runtime')
+ORDER BY rolname;
+
+SELECT member_role.rolname AS member_role, granted_role.rolname AS granted_role
+FROM pg_auth_members AS m
+JOIN pg_roles AS member_role ON member_role.oid = m.member
+JOIN pg_roles AS granted_role ON granted_role.oid = m.roleid
+WHERE member_role.rolname IN ('stockbot_app', 'stockbot_runtime')
+   OR granted_role.rolname IN ('stockbot_app', 'stockbot_runtime');
+
+SELECT tablename, policyname, permissive, cmd, roles, qual, with_check
+FROM pg_policies
+WHERE schemaname = 'public'
+  AND tablename IN ('shop_users', 'shop_products')
+ORDER BY tablename, policyname;
+```
+
+The old role is not used by the revised migration. Do not change it based only on its name; the audit reports its attributes without revealing any password. If `stockbot_runtime` exists with elevated attributes or role memberships, do not run the migration until its ownership and purpose are understood.
+
+After clicking **Run** on the migration, Supabase should show a successful result. To verify the schema, create another SQL Editor query and run:
+
+```sql
+SELECT table_name
+FROM information_schema.tables
+WHERE table_schema = 'public'
+  AND table_name IN ('shop_users', 'shop_products')
+ORDER BY table_name;
+
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class AS c
+JOIN pg_namespace AS n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN ('shop_users', 'shop_products')
+ORDER BY c.relname;
+
+SELECT rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole,
+       rolinherit, rolreplication, rolbypassrls
+FROM pg_roles
+WHERE rolname = 'stockbot_runtime';
+
+SELECT
+  has_table_privilege('stockbot_runtime', 'public.shop_products', 'SELECT') AS app_can_select,
+  has_table_privilege('stockbot_runtime', 'public.shop_products', 'INSERT') AS app_can_insert,
+  has_table_privilege('stockbot_runtime', 'public.shop_products', 'UPDATE') AS app_can_update,
+  has_table_privilege('stockbot_runtime', 'public.shop_products', 'DELETE') AS app_can_delete,
+  has_table_privilege('anon', 'public.shop_products', 'SELECT') AS anon_can_select,
+  has_table_privilege('authenticated', 'public.shop_products', 'SELECT') AS authenticated_can_select;
+
+SELECT tablename, policyname, cmd, qual, with_check
+FROM pg_policies
+WHERE schemaname = 'public'
+  AND tablename IN ('shop_users', 'shop_products')
+ORDER BY tablename, policyname;
+
+SELECT grantee, table_name, privilege_type
+FROM information_schema.role_table_grants
+WHERE table_schema = 'public'
+  AND table_name IN ('shop_users', 'shop_products')
+ORDER BY table_name, grantee, privilege_type;
+```
+
+Expected: both tables are listed; both have `relrowsecurity` and `relforcerowsecurity` set to `true`; `stockbot_runtime` has login enabled and `rolsuper`, `rolcreatedb`, `rolcreaterole`, `rolinherit`, `rolreplication`, and `rolbypassrls` set to `false`; the four app privilege columns are `true`, while `PUBLIC`, `anon`, and `authenticated` have no table privileges; and each table has its owner policy. The policy expressions should compare `telegram_user_id` with the transaction setting `app.telegram_user_id`. The migration does not add sample inventory rows.
 
 The migration creates `shop_users` and `shop_products`, per-user product IDs, exact `numeric(8,2)` prices, ownership indexes, foreign-key cascade, a repeated-confirmation idempotency key, and RLS policies. All application queries also include the Telegram account ID explicitly. No existing local inventory or sample product is copied to Supabase.
 
@@ -29,7 +112,8 @@ If this migration is ever reset or edited, back up the database first. For free 
    | Variable | Value |
    |---|---|
    | `TELEGRAM_BOT_TOKEN` | Replacement token from BotFather |
-   | `DATABASE_URL` | SSL PostgreSQL URI for `stockbot_app` |
+   | `DATABASE_URL` | SSL PostgreSQL URI for `stockbot_runtime` |
+   | `DATABASE_SSL_ROOT_CERT` | `/etc/secrets/supabase-ca.crt` (upload the certificate as a Render secret file) |
    | `BOT_ACCESS_MODE` | `public` |
    | `STORAGE_BACKEND` | `postgres` |
    | `LOW_STOCK_LIMIT` | `5` (or your chosen non-negative integer) |

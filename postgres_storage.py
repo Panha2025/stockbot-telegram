@@ -17,13 +17,14 @@ MAX_PRODUCTS_PER_USER = 500
 class PostgresInventoryManager:
     low_stock_limit = 5
 
-    def __init__(self, database_url, low_stock_limit=5, connect=None):
+    def __init__(self, database_url, low_stock_limit=5, connect=None, ssl_root_cert=None):
         if not database_url or not str(database_url).strip():
             raise ValueError("DATABASE_URL is required for PostgreSQL storage")
         if isinstance(low_stock_limit, bool) or not isinstance(low_stock_limit, int) or low_stock_limit < 0:
             raise ValueError("Low-stock limit must be a non-negative whole number.")
         self.database_url = str(database_url)
         self.low_stock_limit = low_stock_limit
+        self.ssl_root_cert = str(ssl_root_cert) if ssl_root_cert else None
         if connect is None:
             try:
                 import psycopg
@@ -38,7 +39,7 @@ class PostgresInventoryManager:
         return UserInventory(self, user_id)
 
     def check_connection(self):
-        with self._connect(self.database_url, connect_timeout=10, sslmode="require") as conn, conn.cursor() as cur:
+        with self._connect(self.database_url, **self._connection_options()) as conn, conn.cursor() as cur:
             cur.execute("SELECT 1")
             if cur.fetchone()[0] != 1:
                 return False
@@ -51,7 +52,7 @@ class PostgresInventoryManager:
             return True
 
     def _connection(self, user_id):
-        conn = self._connect(self.database_url, connect_timeout=10, sslmode="require")
+        conn = self._connect(self.database_url, **self._connection_options())
         # Transaction-local identity is used by RLS policies on the dedicated
         # non-owner application role. Always set it from verified Telegram data.
         try:
@@ -61,6 +62,12 @@ class PostgresInventoryManager:
             conn.close()
             raise
         return conn
+
+    def _connection_options(self):
+        options = {"connect_timeout": 10, "sslmode": "verify-full"}
+        if self.ssl_root_cert:
+            options["sslrootcert"] = self.ssl_root_cert
+        return options
 
 
 class UserInventory:
