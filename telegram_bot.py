@@ -187,7 +187,18 @@ async def rate_limit_update(update, context):
     user = update.effective_user
     if user is None or not update.effective_chat or update.effective_chat.type != "private":
         return
-    if _within_rate_limit(update, context, user.id):
+    store = context.application.bot_data.get("manager")
+    scoped = store.for_user(user.id) if hasattr(store, "for_user") else None
+    if scoped is not None and hasattr(scoped, "consume_rate_limit"):
+        try:
+            within_limit = scoped.consume_rate_limit()
+        except Exception as exc:
+            LOG.error("Persistent rate-limit check failed (%s)", type(exc).__name__)
+            await update.effective_message.reply_text("StockBot is temporarily unavailable. Please retry shortly.")
+            raise ApplicationHandlerStop
+    else:
+        within_limit = _within_rate_limit(update, context, user.id)
+    if within_limit:
         return
     query = update.callback_query
     if query:
@@ -993,6 +1004,7 @@ async def unknown(update, context):
 
 async def error_handler(update, context):
     error = context.error
+    context.application.bot_data["_webhook_handler_error"] = True
     LOG.error("Telegram update failed (%s)", type(error).__name__)
     if update and update.effective_message:
         try:
@@ -1024,15 +1036,13 @@ async def log_incoming_command(update, context):
         LOG.info("Received /%s", match.group(1).lower())
 
 
-def build_application(token, allowed_ids, stock, access_mode="restricted", admin_ids=None):
+def build_application(token, allowed_ids, stock, access_mode="restricted", admin_ids=None, persistence=None):
     if access_mode == "public" and not hasattr(stock, "for_user"):
         raise ValueError("Public mode requires user-scoped PostgreSQL storage")
-    application = (
-        Application.builder().token(token)
-        .concurrent_updates(False)
-        .post_init(preflight_telegram)
-        .build()
-    )
+    builder = Application.builder().token(token).concurrent_updates(False).post_init(preflight_telegram)
+    if persistence is not None:
+        builder = builder.persistence(persistence)
+    application = builder.build()
     application.bot_data["manager"] = stock
     application.bot_data["allowed_ids"] = allowed_ids
     application.bot_data["access_mode"] = access_mode
@@ -1098,6 +1108,8 @@ def build_application(token, allowed_ids, stock, access_mode="restricted", admin
             per_chat=True,
             per_user=True,
             per_message=False,
+            persistent=persistence is not None,
+            name="stockbot_user_conversation" if persistence is not None else None,
         )
     application.add_handler(TypeHandler(Update, log_incoming_command), group=-1)
     application.add_handler(TypeHandler(Update, rate_limit_update), group=-2)

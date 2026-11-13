@@ -1,9 +1,14 @@
-# Testing Report — COSC 221 Small Shop Inventory with Optional Telegram
+# Testing Report — COSC 221 Small Shop Inventory and Telegram Webhook
 
 **Offline automated command:** `.venv/bin/python -m unittest discover -s tests -v`  
-**Observed result:** **56 tests passed; 0 failures; 0 errors** on Python 3.13.15 with python-telegram-bot 22.8 in this environment.  
-**Test safety:** Isolated temporary JSON files were used; the provided `data/inventory.json` is unchanged.  
-**Telegram live test:** **Not completed**. A read-only Bot API check was attempted without displaying the token, but the request failed at the network layer before identity/webhook information was returned. No polling was started. Handler/preflight tests use mocked API objects.
+**Observed result:** **84 tests passed; 0 failures; 0 errors** on Python 3.13.15 with python-telegram-bot 22.8 in this environment. Python compilation and a CLI launch/exit smoke check also passed.
+
+**Test safety:** Isolated temporary JSON files were used. SHA-256 checks confirmed `data/inventory.json` and `data/sample_inventory.json` are unchanged.
+
+**Supabase:** Migration 003 was applied to the confirmed Supabase project. The four tables report RLS and FORCE RLS enabled, expected policies and runtime grants are present, and `anon`, `authenticated`, and `service_role` cannot read webhook state. A temporary two-account isolation test passed inside a rolled-back transaction; no test rows or temporary role membership remain.
+
+**Webhook:** Mocked/in-process HTTP-handler tests verify invalid-secret rejection, duplicate-update acknowledgment, and ignoring group updates. Persistence tests verify conversation and user state survives new adapter instances and rejects other-account keys. A live Telegram webhook test is **not completed**.
+**Vercel:** The project exists and the production public-mode settings are configured. The local Vercel build check could not run: automatic review rejected pulling project settings because that command could download production environment values into local files. No deployment was started.
 
 ## Required testing table (observed, automated)
 
@@ -86,7 +91,7 @@
 
 ## Known testing limitations
 
-- A read-only live Bot API request was attempted and returned a network failure; no webhook information or bot identity was received, and no polling was started.
-- PTB 22.8 application construction, command routing order, warning behavior, mocked preflight, handler flows, Python compilation, and the CLI were exercised in the project `.venv`.
+- No replacement Telegram token is configured yet, so bot identity, webhook delivery, `/start`, product CRUD, and Telegram's `getWebhookInfo` have not been tested live. After deployment, the owner must send `/start` from Telegram.
+- PTB 22.8 application construction, command routing order, warning behavior, mocked preflight, handler flows, webhook HTTP handling, persistence restarts, Python compilation, and the CLI were exercised in the project `.venv`.
 - Configuration resolver tests verify environment precedence, blank-value fallback, and legacy-key compatibility. A safe workspace check verified one valid `.env` ID without displaying it.
-- A successful `getMe` identity check, webhook state, polling connection, and Telegram account response remain unverified until the Mac has network access to the Telegram Bot API. No token was changed or displayed.
+- Vercel build/deployment remains unverified. The GitHub repository connection also needs its GitHub App authorization completed in Vercel.

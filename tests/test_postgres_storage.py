@@ -168,6 +168,32 @@ class PostgresStorageTests(unittest.TestCase):
     def test_product_limit_is_a_server_side_guard(self):
         self.assertEqual(MAX_PRODUCTS_PER_USER, 500)
 
+    def test_webhook_update_claim_is_unique_and_completed_redelivery_is_duplicate(self):
+        self.answers = [[None, (1234,)], [None, None, ("done", None)]]
+        scoped = self.store.for_user(7001)
+        self.assertEqual(scoped.claim_webhook_update(1234), "claimed")
+        self.assertEqual(scoped.claim_webhook_update(1234), "duplicate")
+        for conn in self.connections:
+            self.assertEqual(conn.identity, "7001")
+            self.assertTrue(any("ON CONFLICT (update_id) DO NOTHING" in query for query, _ in conn.calls))
+
+    def test_recent_in_progress_update_returns_busy_for_telegram_retry(self):
+        self.answers = [[None, None, ("processing", "2026-11-13T00:00:00Z"), (True,)]]
+        self.assertEqual(self.store.for_user(7002).claim_webhook_update(1235), "busy")
+        self.assertTrue(any("FOR UPDATE" in query for query, _ in self.connections[-1].calls))
+
+    def test_failed_update_can_be_reclaimed(self):
+        self.answers = [[None, None, ("failed", None)]]
+        self.assertEqual(self.store.for_user(7003).claim_webhook_update(1236), "claimed")
+        self.assertTrue(any("attempts=attempts+1" in query for query, _ in self.connections[-1].calls))
+
+    def test_persistent_rate_limit_uses_server_returned_count(self):
+        self.answers = [[(60,)], [(61,)]]
+        scoped = self.store.for_user(7004)
+        self.assertTrue(scoped.consume_rate_limit())
+        self.assertFalse(scoped.consume_rate_limit())
+        self.assertTrue(all(conn.identity == "7004" for conn in self.connections))
+
 
 if __name__ == "__main__":
     unittest.main()

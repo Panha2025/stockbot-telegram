@@ -258,3 +258,67 @@ class UserInventory:
                 (self.user_id,),
             )
             return cur.fetchone() is not None
+
+    def consume_rate_limit(self, limit=60):
+        """Atomically charge one request against a persistent 60-second window."""
+        with self.store._connection(self.user_id) as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO public.shop_rate_limits (telegram_user_id, window_started_at, request_count) "
+                "VALUES (%s, now(), 1) "
+                "ON CONFLICT (telegram_user_id) DO UPDATE SET "
+                "window_started_at = CASE "
+                "WHEN public.shop_rate_limits.window_started_at <= now() - interval '60 seconds' "
+                "THEN now() ELSE public.shop_rate_limits.window_started_at END, "
+                "request_count = CASE "
+                "WHEN public.shop_rate_limits.window_started_at <= now() - interval '60 seconds' "
+                "THEN 1 ELSE public.shop_rate_limits.request_count + 1 END, "
+                "updated_at = now() RETURNING request_count",
+                (self.user_id,),
+            )
+            return cur.fetchone()[0] <= limit
+
+    def claim_webhook_update(self, update_id, retry_after_seconds=300):
+        """Claim an update once; return claimed, duplicate, or busy."""
+        with self.store._connection(self.user_id) as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM public.shop_webhook_updates "
+                "WHERE telegram_user_id = %s AND received_at < now() - interval '30 days'",
+                (self.user_id,),
+            )
+            cur.execute(
+                "INSERT INTO public.shop_webhook_updates (update_id, telegram_user_id, status) "
+                "VALUES (%s, %s, 'processing') ON CONFLICT (update_id) DO NOTHING RETURNING update_id",
+                (update_id, self.user_id),
+            )
+            if cur.fetchone() is not None:
+                return "claimed"
+            cur.execute(
+                "SELECT status, started_at FROM public.shop_webhook_updates "
+                "WHERE update_id = %s AND telegram_user_id = %s FOR UPDATE",
+                (update_id, self.user_id),
+            )
+            existing = cur.fetchone()
+            if existing is None or existing[0] == "done":
+                return "duplicate"
+            if existing[0] == "processing":
+                cur.execute(
+                    "SELECT %s::timestamptz > now() - (%s * interval '1 second')",
+                    (existing[1], retry_after_seconds),
+                )
+                if cur.fetchone()[0]:
+                    return "busy"
+            cur.execute(
+                "UPDATE public.shop_webhook_updates SET status='processing', started_at=now(), "
+                "attempts=attempts+1, finished_at=NULL WHERE update_id=%s AND telegram_user_id=%s",
+                (update_id, self.user_id),
+            )
+            return "claimed"
+
+    def finish_webhook_update(self, update_id, *, succeeded):
+        status = "done" if succeeded else "failed"
+        with self.store._connection(self.user_id) as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE public.shop_webhook_updates SET status=%s, finished_at=now() "
+                "WHERE update_id=%s AND telegram_user_id=%s",
+                (status, update_id, self.user_id),
+            )

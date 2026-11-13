@@ -27,7 +27,7 @@ The low-stock threshold defaults to 5; configure another value with `python3 app
 The university CLI continues to use local JSON and needs no database. The Telegram bot has two separate configurations:
 
 - **Local course/demo mode:** JSON storage and a restricted numeric allowlist. The bot must be running on your computer.
-- **Public hosted mode:** PostgreSQL storage and a private inventory per verified Telegram user. Use the Render worker and Supabase steps in [DEPLOYMENT.md](DEPLOYMENT.md).
+- **Public hosted mode:** Telegram HTTPS webhooks, Vercel Hobby Python Functions, and Supabase PostgreSQL with a private inventory per verified Telegram user. See [DEPLOYMENT.md](DEPLOYMENT.md).
 
 Install the bot dependencies locally with:
 
@@ -40,7 +40,7 @@ cp .env.example .env
 
 Set a fresh `TELEGRAM_BOT_TOKEN` privately in `.env` for local use. If a token has ever been exposed, revoke it through BotFather and use only its replacement. `.env` is ignored by Git. For local restricted mode, set `TELEGRAM_ALLOWED_USER_IDS` to numeric IDs separated by commas, then run `python telegram_bot.py`. `/myid` remains available while access is locked.
 
-The public deployment uses `BOT_ACCESS_MODE=public`, `STORAGE_BACKEND=postgres`, a new bot token, and a least-privilege database URL stored only in Render secrets. It ignores the local JSON file and never uploads the university sample data. Every Telegram action, including callback product IDs, is scoped to Telegram's verified private-chat user ID. See the deployment guide for account setup, migration, recovery, monitoring, and plan costs.
+The public deployment uses `BOT_ACCESS_MODE=public`, `STORAGE_BACKEND=postgres`, a new bot token, and a least-privilege database URL stored only in Vercel private environment variables. It ignores the local JSON file and never uploads the university sample data. Every Telegram action, including callback product IDs, is scoped to Telegram's verified private-chat user ID. See the deployment guide for migrations, webhook registration, and free-plan limits.
 
 Supported features include `/start`, add, paginated view, search, update, confirmed delete, summary, low-stock alerts, and confirmed `/deleteaccount`. Group chats are rejected. The public service rate limits each user and caps an account at 500 products. Data remains until the user deletes their account or the database operator removes it.
 
@@ -56,7 +56,10 @@ COSC221_Telegram_Inventory_Final/
 ├── telegram_bot.py        # optional Telegram bot menus and conversations
 ├── postgres_storage.py    # owner-scoped PostgreSQL storage for public bot
 ├── migrations/            # Supabase PostgreSQL schema and RLS
-├── render.yaml             # always-on background worker blueprint
+├── api/telegram.py         # Vercel HTTPS webhook function
+├── webhook_runtime.py      # persistent Telegram conversation state
+├── scripts/register_webhook.py # safely registers Telegram webhook
+├── vercel.json             # function region and duration
 ├── bot_helpers.py         # message formatting and configuration helpers
 ├── requirements.txt       # only used by Telegram
 ├── .env.example           # safe configuration template (no real token)
@@ -107,7 +110,7 @@ This **replaces your current changes**. Back up `data/inventory.json` first if n
 ## Important limitations
 
 - Telegram is an **optional extension**, not the core assignment. The professor does not award automatic extra marks for extra interfaces; request instructor approval if necessary.
-- Local Telegram mode cannot answer when your laptop/computer is off. Hosted mode depends on Render, Supabase, Telegram, and network availability; it has no contractual uptime guarantee.
+- Local Telegram mode cannot answer when your laptop/computer is off. The free Vercel Hobby and Supabase Free hosted mode depends on provider quotas, pause policies, Telegram, and network availability; it has no uptime guarantee.
 - Local JSON is intended for one process at a time, not concurrent app/bot runs or multiple machines.
 - Data fields are for inventory only. Sales tracking, sign-in accounts, machine learning, and paid services are outside this assignment's scope.
 - **Testing disclosure:** Python CLI, storage, helpers and code syntax were tested offline. Live Telegram messaging still requires a personal token and connection and must be tested by your team.
