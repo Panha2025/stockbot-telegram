@@ -253,6 +253,12 @@ class UserInventory:
 
     def delete_account(self):
         with self.store._connection(self.user_id) as conn, conn.cursor() as cur:
+            # Webhook delivery records do not reference shop_users, so remove this
+            # user's deduplication state explicitly as part of the same transaction.
+            cur.execute(
+                "DELETE FROM public.shop_webhook_updates WHERE telegram_user_id = %s",
+                (self.user_id,),
+            )
             cur.execute(
                 "DELETE FROM public.shop_users WHERE telegram_user_id = %s RETURNING telegram_user_id",
                 (self.user_id,),

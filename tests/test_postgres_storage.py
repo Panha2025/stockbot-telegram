@@ -159,9 +159,14 @@ class PostgresStorageTests(unittest.TestCase):
         self.assertEqual(inserts[0][1][-2], product.price)
 
     def test_account_delete_is_scoped_to_verified_user(self):
-        self.answers = [[(101010,)]]
+        self.answers = [[None, (101010,)]]
         self.assertTrue(self.store.for_user(101010).delete_account())
-        query, params = self.connections[-1].calls[-1]
+        calls = self.connections[-1].calls
+        self.assertIn(
+            ("DELETE FROM public.shop_webhook_updates WHERE telegram_user_id = %s", (101010,)),
+            calls,
+        )
+        query, params = calls[-1]
         self.assertIn("DELETE FROM public.shop_users WHERE telegram_user_id = %s", query)
         self.assertEqual(params, (101010,))
 
