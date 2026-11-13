@@ -63,7 +63,15 @@ BEGIN
           JOIN pg_roles AS parent_role ON parent_role.oid = membership.roleid
           JOIN pg_roles AS member_role ON member_role.oid = membership.member
          WHERE member_role.rolname = 'stockbot_runtime'
-            OR parent_role.rolname = 'stockbot_runtime'
+            OR (
+                parent_role.rolname = 'stockbot_runtime'
+                AND NOT (
+                    member_role.rolname = 'postgres'
+                    AND membership.admin_option
+                    AND NOT membership.inherit_option
+                    AND NOT membership.set_option
+                )
+            )
     ) THEN
         RAISE EXCEPTION 'Existing stockbot_runtime has role memberships; inspect them before continuing';
     END IF;
@@ -105,14 +113,14 @@ BEGIN
     ) THEN
         EXECUTE $policy$
             ALTER POLICY shop_users_owner_policy ON public.shop_users TO public
-            USING (telegram_user_id = nullif(current_setting('app.telegram_user_id', true), '')::bigint)
-            WITH CHECK (telegram_user_id = nullif(current_setting('app.telegram_user_id', true), '')::bigint)
+            USING (telegram_user_id = (SELECT nullif(current_setting('app.telegram_user_id', true), '')::bigint))
+            WITH CHECK (telegram_user_id = (SELECT nullif(current_setting('app.telegram_user_id', true), '')::bigint))
         $policy$;
     ELSE
         EXECUTE $policy$
             CREATE POLICY shop_users_owner_policy ON public.shop_users TO public
-            USING (telegram_user_id = nullif(current_setting('app.telegram_user_id', true), '')::bigint)
-            WITH CHECK (telegram_user_id = nullif(current_setting('app.telegram_user_id', true), '')::bigint)
+            USING (telegram_user_id = (SELECT nullif(current_setting('app.telegram_user_id', true), '')::bigint))
+            WITH CHECK (telegram_user_id = (SELECT nullif(current_setting('app.telegram_user_id', true), '')::bigint))
         $policy$;
     END IF;
 
@@ -123,14 +131,14 @@ BEGIN
     ) THEN
         EXECUTE $policy$
             ALTER POLICY shop_products_owner_policy ON public.shop_products TO public
-            USING (telegram_user_id = nullif(current_setting('app.telegram_user_id', true), '')::bigint)
-            WITH CHECK (telegram_user_id = nullif(current_setting('app.telegram_user_id', true), '')::bigint)
+            USING (telegram_user_id = (SELECT nullif(current_setting('app.telegram_user_id', true), '')::bigint))
+            WITH CHECK (telegram_user_id = (SELECT nullif(current_setting('app.telegram_user_id', true), '')::bigint))
         $policy$;
     ELSE
         EXECUTE $policy$
             CREATE POLICY shop_products_owner_policy ON public.shop_products TO public
-            USING (telegram_user_id = nullif(current_setting('app.telegram_user_id', true), '')::bigint)
-            WITH CHECK (telegram_user_id = nullif(current_setting('app.telegram_user_id', true), '')::bigint)
+            USING (telegram_user_id = (SELECT nullif(current_setting('app.telegram_user_id', true), '')::bigint))
+            WITH CHECK (telegram_user_id = (SELECT nullif(current_setting('app.telegram_user_id', true), '')::bigint))
         $policy$;
     END IF;
 END;
@@ -138,6 +146,6 @@ $$;
 
 GRANT USAGE ON SCHEMA public TO stockbot_runtime;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.shop_users, public.shop_products TO stockbot_runtime;
-REVOKE ALL ON public.shop_users, public.shop_products FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON public.shop_users, public.shop_products FROM PUBLIC, anon, authenticated, service_role;
 
 COMMIT;

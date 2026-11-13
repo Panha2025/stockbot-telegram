@@ -12,7 +12,7 @@ You need owner access to a Supabase project and a Render account. Creating a pai
 
 1. Keep the project-owner password separate from the bot's app-role password. In Supabase **Project Settings → Database → SSL Configuration**, download the database root certificate and save it locally.
 2. First run the **read-only audit query** below in a new Supabase SQL Editor query. The previous failed migration may have left some objects in place, depending on how the SQL Editor transaction was handled. Review the role output: the revised migration deliberately ignores `stockbot_app` and uses a separate `stockbot_runtime` role. Do not reuse or alter an existing role reported as elevated.
-3. If the audit shows no `stockbot_runtime` role, or shows that it is a login role with no elevated flags and no memberships, paste the full `migrations/001_public_inventory.sql` into a new SQL Editor query and click **Run**. The script is safe to rerun: it uses `IF NOT EXISTS`, creates or corrects only the named owner policies, and performs no drops or row deletes. It aborts if it finds an unexpected policy or an unsafe pre-existing `stockbot_runtime` role. If it aborts, stop and inspect the audit results rather than changing or deleting database objects.
+3. If the audit shows no `stockbot_runtime` role, or shows a login role with no elevated flags and no unexpected memberships, paste and run `migrations/001_public_inventory.sql` first, then paste and run `migrations/002_public_inventory_policy_acl_hardening.sql`. PostgreSQL 16+ automatically grants the role creator an admin membership in a newly created role with `INHERIT` and `SET ROLE` disabled; the first migration accepts only that `postgres` membership and rejects any other membership. Both scripts are safe to rerun and do not drop tables or delete rows. If either aborts, stop and inspect the audit results rather than changing or deleting database objects.
 4. Set the app-role password interactively so it never appears in SQL source, browser query history, or the shell command. On your Mac, use `psql` with the direct connection details from Supabase **Connect** (or its **Session pooler** details if direct IPv6 is unavailable). Run `psql 'host=<HOST_FROM_CONNECT> port=<PORT_FROM_CONNECT> dbname=postgres user=<OWNER_USERNAME_FROM_CONNECT> sslmode=verify-full sslrootcert=<LOCAL_ROOT_CERT_PATH>'`. This command contains no password; `psql` prompts for the project owner's password. At the `psql` prompt, run `\password stockbot_runtime`, enter a freshly generated long random password from your password manager when prompted, then enter it again to confirm. Save it in that password manager and type `\q` to exit. The `\password` prompt hides the new value and keeps it out of command history.
 5. In Supabase **Connect**, choose **Session pooler** for a Render worker on an IPv4-only network. Copy the complete URI and substitute the custom-role username `stockbot_runtime.<PROJECT_REF>` and the app-role password. Use the pooler host and port exactly as shown. Percent-encode any reserved characters in the password for the URI.
 6. In Render, open the worker's **Environment** page, choose **Add Secret File**, set the filename to `supabase-ca.crt`, and paste in the downloaded root certificate file contents. Set `DATABASE_SSL_ROOT_CERT` to `/etc/secrets/supabase-ca.crt`. Store the completed URI only in Render's `DATABASE_URL` secret. The app verifies the server certificate with `sslmode=verify-full`. Do not use the Supabase `service_role` API key or the project-owner database password. The runtime role has no table ownership or `BYPASSRLS`, and PostgreSQL row-level policies require the transaction-local verified Telegram ID set by the bot.
@@ -76,13 +76,23 @@ SELECT rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole,
 FROM pg_roles
 WHERE rolname = 'stockbot_runtime';
 
+SELECT granted_role.rolname AS granted_role, member_role.rolname AS member_role,
+       m.admin_option, m.inherit_option, m.set_option
+FROM pg_auth_members AS m
+JOIN pg_roles AS member_role ON member_role.oid = m.member
+JOIN pg_roles AS granted_role ON granted_role.oid = m.roleid
+WHERE member_role.rolname = 'stockbot_runtime'
+   OR granted_role.rolname = 'stockbot_runtime';
+
 SELECT
   has_table_privilege('stockbot_runtime', 'public.shop_products', 'SELECT') AS app_can_select,
   has_table_privilege('stockbot_runtime', 'public.shop_products', 'INSERT') AS app_can_insert,
   has_table_privilege('stockbot_runtime', 'public.shop_products', 'UPDATE') AS app_can_update,
   has_table_privilege('stockbot_runtime', 'public.shop_products', 'DELETE') AS app_can_delete,
   has_table_privilege('anon', 'public.shop_products', 'SELECT') AS anon_can_select,
-  has_table_privilege('authenticated', 'public.shop_products', 'SELECT') AS authenticated_can_select;
+  has_table_privilege('authenticated', 'public.shop_products', 'SELECT') AS authenticated_can_select,
+  has_table_privilege('service_role', 'public.shop_products', 'SELECT') AS service_role_can_select,
+  has_table_privilege('service_role', 'public.shop_products', 'TRUNCATE') AS service_role_can_truncate;
 
 SELECT tablename, policyname, cmd, qual, with_check
 FROM pg_policies
@@ -97,9 +107,9 @@ WHERE table_schema = 'public'
 ORDER BY table_name, grantee, privilege_type;
 ```
 
-Expected: both tables are listed; both have `relrowsecurity` and `relforcerowsecurity` set to `true`; `stockbot_runtime` has login enabled and `rolsuper`, `rolcreatedb`, `rolcreaterole`, `rolinherit`, `rolreplication`, and `rolbypassrls` set to `false`; the four app privilege columns are `true`, while `PUBLIC`, `anon`, and `authenticated` have no table privileges; and each table has its owner policy. The policy expressions should compare `telegram_user_id` with the transaction setting `app.telegram_user_id`. The migration does not add sample inventory rows.
+Expected: both tables are listed; both have `relrowsecurity` and `relforcerowsecurity` set to `true`; `stockbot_runtime` has login enabled and `rolsuper`, `rolcreatedb`, `rolcreaterole`, `rolinherit`, `rolreplication`, and `rolbypassrls` set to `false`; the four app privilege columns are `true`, while `PUBLIC`, `anon`, `authenticated`, and `service_role` have no table privileges; and each table has its owner policy. The only accepted role-membership row is `stockbot_runtime` granted to `postgres` with `admin_option=true`, `inherit_option=false`, and `set_option=false`. The policy expressions should compare `telegram_user_id` with the transaction setting `app.telegram_user_id`. The migration does not add sample inventory rows.
 
-The migration creates `shop_users` and `shop_products`, per-user product IDs, exact `numeric(8,2)` prices, ownership indexes, foreign-key cascade, a repeated-confirmation idempotency key, and RLS policies. All application queries also include the Telegram account ID explicitly. No existing local inventory or sample product is copied to Supabase.
+The migrations create `shop_users` and `shop_products`, per-user product IDs, exact `numeric(8,2)` prices, ownership indexes, foreign-key cascade, a repeated-confirmation idempotency key, and RLS policies. The hardening migration also removes Supabase's default `service_role` table ACLs from these bot-owned tables. All application queries also include the Telegram account ID explicitly. No existing local inventory or sample product is copied to Supabase.
 
 If this migration is ever reset or edited, back up the database first. For free Supabase projects, inactivity can pause the project and automatic backups are not included. Pro currently lists $25/month, includes $10/month of compute credits, does not pause for inactivity, and includes seven days of daily backups. Confirm current terms in the [Supabase pricing page](https://supabase.com/pricing) and [backup guide](https://supabase.com/docs/guides/platform/backups).
 

@@ -70,6 +70,25 @@ class PostgresStorageTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.for_user(True)
 
+    def test_connections_require_full_tls_verification_and_optional_root_certificate(self):
+        self.assertEqual(
+            self.store._connection_options(),
+            {"connect_timeout": 10, "sslmode": "verify-full"},
+        )
+        with_certificate = PostgresInventoryManager(
+            "postgresql://unit-test.invalid/db",
+            connect=lambda *_args, **_kwargs: FakeConnection(),
+            ssl_root_cert="/etc/secrets/supabase-ca.crt",
+        )
+        self.assertEqual(
+            with_certificate._connection_options(),
+            {
+                "connect_timeout": 10,
+                "sslmode": "verify-full",
+                "sslrootcert": "/etc/secrets/supabase-ca.crt",
+            },
+        )
+
     def test_product_lookup_is_scoped_and_uses_transaction_local_rls_identity(self):
         self.answers = [[("P001", "Pen", "Stationery", 2, "0.50")]]
         product = self.store.for_user(71234).get("P001")
