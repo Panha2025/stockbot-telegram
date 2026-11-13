@@ -8,6 +8,7 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 .aws/
+.vercel/
 .env.local
 *.crt
 *.pem

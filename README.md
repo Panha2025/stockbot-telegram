@@ -4,9 +4,9 @@
 
 **Language:** Python 3.10+
 
-**Project type:** Python terminal application with an optional local Telegram bot
+**Project type:** Python terminal application, with **one optional Telegram interface**
 
-**Storage:** Local JSON files; no database, website, or hosting required
+**Storage:** Local JSON for the CLI; private PostgreSQL inventories for the hosted Telegram bot
 
 **Team:** [Fill in registered team number], [Member 1], [Member 2], [Member 3], [Member 4 if applicable]
 
@@ -28,9 +28,12 @@ The low-stock threshold defaults to 5; configure another value with `python3 app
 
 ## Telegram bot setup
 
-Try the bot: [@SmallShopInventory221Bot](https://t.me/SmallShopInventory221Bot).
+Try the public bot: [@SmallShopInventory221Bot](https://t.me/SmallShopInventory221Bot). The university CLI continues to use local JSON and needs no database. The Telegram bot has two separate configurations:
 
-The Telegram bot runs locally on your MacBook using polling. It only responds while your MacBook is running the bot and connected to the internet. While it is running, anyone can use the bot in a private Telegram chat. Each Telegram account gets a separate JSON file in `data/telegram_users/`; the CLI continues to use only `data/inventory.json`.
+- **Local course/demo mode:** JSON storage and a restricted numeric allowlist. The bot must be running on your computer.
+- **Public hosted mode:** Telegram HTTPS webhooks, Vercel Hobby Python Functions, and Supabase PostgreSQL with a private inventory per verified Telegram user. See [DEPLOYMENT.md](DEPLOYMENT.md).
+
+Once deployed, the webhook bot works while your MacBook is off. Local polling remains available for a restricted demo, but never run it with the production token while Telegram's webhook is registered.
 
 Install the bot dependencies locally with:
 
@@ -41,15 +44,13 @@ python3 -m pip install -r requirements.txt
 cp -n .env.example .env
 ```
 
-Set `TELEGRAM_BOT_TOKEN` in `.env`. If the token was exposed, revoke it with `@BotFather` and use the replacement. `.env` is ignored by Git. No Telegram user allowlist or database password is needed. Start the bot with:
+Set a fresh `TELEGRAM_BOT_TOKEN` privately in `.env` for local use. If a token has ever been exposed, revoke it through BotFather and use only its replacement. `.env` is ignored by Git. For local restricted mode, set `TELEGRAM_ALLOWED_USER_IDS` to numeric IDs separated by commas, then run `python telegram_bot.py`. `/myid` remains available while access is locked. Never run local polling with the same token while its production webhook is registered.
 
-```bash
-.venv/bin/python telegram_bot.py
-```
+The public deployment uses `BOT_ACCESS_MODE=public`, `STORAGE_BACKEND=postgres`, a new bot token, and a least-privilege database URL stored only in Vercel private environment variables. It ignores the local JSON file and never uploads the university sample data. Every Telegram action, including callback product IDs, is scoped to Telegram's verified private-chat user ID. See the deployment guide for migrations, webhook registration, and free-plan limits.
 
-The bot accepts private chats and scopes every command and button action to Telegram's verified sender ID. It preserves product IDs, pagination, add/search/update/delete, summary, low-stock alerts, confirmed `/deleteaccount`, admin-only `/status`, and the 500-product limit. The local rate limit is per user and resets when the bot restarts. `/myid` remains available.
+Supported features include `/start`, add, paginated view, search, update, confirmed delete, summary, low-stock alerts, and confirmed `/deleteaccount`. Group chats are rejected. The public service rate limits each user and caps an account at 500 products. Data remains until the user deletes their account or the database operator removes it.
 
-The bot must be running on your MacBook and connected to the internet. Keep only one polling process active for this token. Telegram inventories remain on this MacBook in files excluded from Git. The CLI and bot use different JSON files and can run at the same time.
+Local JSON is designed for one writer at a time. The Telegram local mode and CLI should not run simultaneously against the same JSON file. The hosted bot uses a separate PostgreSQL database and does not share the CLI's sample data. Existing local Telegram user files are ignored by Git and Vercel; an optional all-or-nothing import is described in [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## What is in the ZIP?
 
@@ -59,7 +60,13 @@ COSC221_Telegram_Inventory_Final/
 ├── inventory.py           # Product and InventoryManager classes; validation
 ├── storage.py             # robust local JSON load / atomic save
 ├── telegram_bot.py        # optional Telegram bot menus and conversations
-├── telegram_storage.py    # separate JSON file for each Telegram account
+├── postgres_storage.py    # owner-scoped PostgreSQL storage for public bot
+├── migrations/            # Supabase PostgreSQL schema and RLS
+├── api/telegram.py         # Vercel HTTPS webhook function
+├── webhook_runtime.py      # persistent Telegram conversation state
+├── scripts/register_webhook.py # safely registers Telegram webhook
+├── scripts/import_local_telegram_data.py # opt-in, no-overwrite migration from per-user JSON
+├── vercel.json             # function region and duration
 ├── bot_helpers.py         # message formatting and configuration helpers
 ├── requirements.txt       # only used by Telegram
 ├── .env.example           # safe configuration template (no real token)
@@ -110,9 +117,9 @@ This **replaces your current changes**. Back up `data/inventory.json` first if n
 ## Important limitations
 
 - Telegram is an **optional extension**, not the core assignment. The professor does not award automatic extra marks for extra interfaces; request instructor approval if necessary.
-- The local Telegram bot cannot answer when your MacBook is off, asleep, or offline. There is no cloud hosting or uptime guarantee.
-- Local inventory files are designed for one polling process, not multiple bot copies or multiple machines.
-- Data fields are for inventory only. Sales tracking, online accounts, machine learning, and paid services are outside this assignment's scope.
+- Local Telegram polling cannot answer when your laptop/computer is off. The hosted webhook can run without your MacBook, but Vercel Hobby quotas and Supabase Free inactivity pauses can interrupt it; there is no uptime guarantee.
+- Local JSON is intended for one process at a time, not concurrent app/bot runs or multiple machines.
+- Data fields are for inventory only. Sales tracking, sign-in accounts, machine learning, and paid services are outside this assignment's scope.
 - **Testing disclosure:** Python CLI, storage, helpers and code syntax were tested offline. Live Telegram messaging still requires a personal token and connection and must be tested by your team.
 
 ## Before Canvas submission
