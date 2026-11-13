@@ -158,8 +158,11 @@ class InventoryManager:
             raise ProductNotFound(f"Product '{product_id}' was not found.")
         return product
 
-    def add(self, name, category, quantity, price, product_id=None):
+    def add(self, name, category, quantity, price, product_id=None, *, idempotency_key=None):
         """Add a product, generating an ID unless one is explicitly supplied."""
+        # Accepted to share the storage-adapter API; JSON writes already happen
+        # once per confirmed bot callback and need no database idempotency key.
+        del idempotency_key
         next_id = self._next_id
         if product_id is None:
             while f"P{next_id:03d}" in self._products:

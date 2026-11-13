@@ -1,0 +1,24 @@
+services:
+  - type: worker
+    name: stockbot-telegram-worker
+    runtime: python
+    region: singapore
+    plan: starter
+    branch: main
+    autoDeploy: false
+    buildCommand: pip install -r requirements.txt
+    startCommand: python telegram_bot.py
+    restartPolicy: always
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: BOT_ACCESS_MODE
+        value: public
+      - key: STORAGE_BACKEND
+        value: postgres
+      - key: LOW_STOCK_LIMIT
+        value: "5"
+      - key: TELEGRAM_ADMIN_USER_IDS
+        sync: false

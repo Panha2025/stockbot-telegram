@@ -4,7 +4,9 @@ import logging
 from pathlib import Path
 import re
 import secrets
+import time
 import warnings
+from collections import deque
 
 from bot_helpers import (
     is_authorized_user,
@@ -17,6 +19,7 @@ from bot_helpers import (
 )
 from inventory import InventoryError, InventoryManager, Product
 from storage import DataFileError, InventoryStorage
+from postgres_storage import PostgresInventoryManager
 
 try:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -26,6 +29,7 @@ try:
         CommandHandler,
         ConversationHandler,
         MessageHandler,
+        ApplicationHandlerStop,
         TypeHandler,
         filters,
     )
@@ -58,6 +62,8 @@ CATEGORIES = (
 ADD_KEYS = ("add_draft", "add_edit_field")
 EDIT_KEYS = ("edit_id", "edit_field", "edit_nonce", "edit_return")
 DELETE_KEYS = ("delete_id", "delete_nonce", "delete_return")
+ACCOUNT_DELETE_KEY = "delete_account_nonce"
+RATE_LIMIT_PER_MINUTE = 60
 
 
 class ExistingWebhookError(RuntimeError):
@@ -98,7 +104,15 @@ def category_keyboard(prefix, nonce):
 
 
 def manager(context):
-    return context.application.bot_data["manager"]
+    store = context.application.bot_data["manager"]
+    if hasattr(store, "for_user"):
+        # PTB binds this private context field from Update.effective_user.id.
+        # It is never read from message text or callback data.
+        user_id = getattr(context, "_user_id", getattr(context, "user_id", None))
+        if user_id is None:
+            raise RuntimeError("Telegram account identity is unavailable")
+        return store.for_user(user_id)
+    return store
 
 
 async def reply(update, message, markup=None):
@@ -120,21 +134,67 @@ async def acknowledge(update, text=None):
 async def authorized(update, context):
     user = update.effective_user
     chat = update.effective_chat
-    allowed = context.application.bot_data["allowed_ids"]
+    access_mode = context.application.bot_data.get("access_mode", "restricted")
+    allowed = context.application.bot_data.get("allowed_ids", set())
     if chat is None or chat.type != "private" or user is None:
         LOG.warning("Inventory access denied for a non-private or unidentified update")
         await reply(update, "Please use this bot in a private chat.")
         return False
-    if not is_authorized_user(user.id, chat.type, allowed):
+    permitted = chat.type == "private" and user is not None and (
+        access_mode == "public" or is_authorized_user(user.id, chat.type, allowed)
+    )
+    if not permitted:
         LOG.warning("Inventory access denied; allowlist has no matching user")
         await reply(
             update,
-            "🔒 Access denied. Inventory access is locked for this account.\n"
-            "Send /myid to see your Telegram ID, then ask the bot owner to add it to TELEGRAM_ALLOWED_USER_IDS.\n"
+            "🔒 Access denied. Inventory access is locked for this account. Send /myid for account support.\n"
             "No inventory information was shown or changed.",
         )
         return False
     return True
+
+
+def _within_rate_limit(update, context, user_id):
+    """Apply an in-process per-account limit once per Telegram update."""
+    update_id = getattr(update, "update_id", None)
+    if update_id is not None and context.user_data.get("_rate_limited_update") == update_id:
+        return True
+    windows = context.application.bot_data.setdefault("request_windows", {})
+    now = time.monotonic()
+    if user_id not in windows and len(windows) >= 10000:
+        for old_id, old_events in list(windows.items()):
+            while old_events and now - old_events[0] >= 60:
+                old_events.popleft()
+            if not old_events:
+                windows.pop(old_id, None)
+            if len(windows) < 10000:
+                break
+        if len(windows) >= 10000:
+            return False
+    events = windows.setdefault(user_id, deque())
+    while events and now - events[0] >= 60:
+        events.popleft()
+    if len(events) >= RATE_LIMIT_PER_MINUTE:
+        return False
+    events.append(now)
+    if update_id is not None:
+        context.user_data["_rate_limited_update"] = update_id
+    return True
+
+
+async def rate_limit_update(update, context):
+    """Limit every incoming private-chat update, including form text steps."""
+    user = update.effective_user
+    if user is None or not update.effective_chat or update.effective_chat.type != "private":
+        return
+    if _within_rate_limit(update, context, user.id):
+        return
+    query = update.callback_query
+    if query:
+        await query.answer("Too many requests. Please wait a minute.")
+    elif update.effective_message:
+        await update.effective_message.reply_text("You’re making requests too quickly. Please wait a minute and try again.")
+    raise ApplicationHandlerStop
 
 
 async def whoami(update, context):
@@ -145,19 +205,83 @@ async def whoami(update, context):
         await reply(update, "Send /myid in a private chat with the bot.")
 
 
+async def delete_account_start(update, context):
+    if not await authorized(update, context):
+        return
+    nonce = secrets.token_urlsafe(7)
+    context.user_data[ACCOUNT_DELETE_KEY] = nonce
+    await reply(
+        update,
+        "⚠️ PERMANENT ACCOUNT DELETION\n\n"
+        "This permanently deletes every product in your cloud inventory. "
+        "This cannot be undone. Confirm only if you want to erase your account data.",
+        InlineKeyboardMarkup([
+            [button("🗑️ Permanently Delete My Account", f"account:delete:{nonce}")],
+            [button("Cancel", f"account:cancel:{nonce}")],
+        ]),
+    )
+
+
+async def delete_account_callback(update, context):
+    if not await authorized(update, context):
+        return
+    match = re.fullmatch(r"account:(delete|cancel):([A-Za-z0-9_-]+)", update.callback_query.data or "")
+    if not match or match.group(2) != context.user_data.get(ACCOUNT_DELETE_KEY):
+        await stale_callback(update, context)
+        return
+    context.user_data.pop(ACCOUNT_DELETE_KEY, None)
+    if match.group(1) == "cancel":
+        await reply(update, "Account deletion cancelled. Your inventory is unchanged.", main_keyboard())
+        return
+    try:
+        deleted = manager(context).delete_account()
+    except Exception as exc:
+        LOG.error("Account deletion failed (%s)", type(exc).__name__)
+        await reply(update, "Account deletion could not be completed. Please retry later.")
+        return
+    await reply(
+        update,
+        "Your account and all associated inventory records have been permanently deleted."
+        if deleted else "No account data was found to delete.",
+    )
+
+
+async def admin_status(update, context):
+    user = update.effective_user
+    chat = update.effective_chat
+    admins = context.application.bot_data.get("admin_ids", set())
+    if not user or not chat or chat.type != "private" or user.id not in admins:
+        await reply(update, "This maintenance command is restricted to configured administrators.")
+        return
+    store = context.application.bot_data["manager"]
+    try:
+        healthy = store.check_connection() if hasattr(store, "check_connection") else True
+    except Exception as exc:
+        LOG.error("Admin health check failed (%s)", type(exc).__name__)
+        healthy = False
+    await reply(update, "StockBot database: healthy." if healthy else "StockBot database: unavailable.")
+
+
 async def home(update, context):
     if not await authorized(update, context):
         return
+    if context.application.bot_data.get("access_mode") == "public":
+        try:
+            manager(context).ensure_account()
+        except Exception as exc:
+            LOG.error("Account initialization failed (%s)", type(exc).__name__)
+            await reply(update, "The inventory service is temporarily unavailable. Please try again shortly.")
+            return
     summary = manager(context).summary()
     text = (
         "📦 SMALL SHOP INVENTORY\n\n"
-        "Welcome to your inventory manager!\n\n"
+        "Welcome to your private inventory manager!\n\n"
         "📊 Inventory Overview\n"
         f"• Total Products: {summary['total_products']}\n"
         f"• Units in Stock: {summary['total_units']}\n"
         f"• Inventory Value: ${summary['inventory_value']}\n"
         f"• Low-Stock Products: {summary['low_stock_count']}\n\n"
-        "Choose an action below. Changes save to the shared JSON inventory."
+        "Choose an action below. Your inventory is private to your Telegram account."
     )
     await reply(update, text, main_keyboard())
 
@@ -178,7 +302,8 @@ async def help_command(update, context):
         "/add — add product   /list — browse inventory\n"
         "/search — find products   /update or /edit — edit product\n"
         "/delete — delete safely   /summary — inventory report\n"
-        "/cancel — cancel an unfinished operation",
+        "/cancel — cancel an unfinished operation\n"
+        "/deleteaccount — permanently erase your cloud inventory (confirmation required)",
         main_keyboard(),
     )
 
@@ -497,6 +622,7 @@ async def add_confirmation(update, context):
         product = manager(context).add(
             name=draft["name"], category=draft["category"],
             quantity=draft["quantity"], price=draft["price"],
+            idempotency_key=draft["nonce"],
         )
     except (InventoryError, DataFileError) as exc:
         await reply(update, f"Could not save the product: {exc}\nYour preview is still here; you can retry or cancel.", add_confirm_keyboard(draft["nonce"]))
@@ -828,6 +954,8 @@ async def navigate(update, context):
         await search_start(update, context)
     elif action.startswith("delete:"):
         await stale_callback(update, context)
+    elif action.startswith("account:"):
+        await delete_account_callback(update, context)
     else:
         await stale_callback(update, context)
 
@@ -896,7 +1024,9 @@ async def log_incoming_command(update, context):
         LOG.info("Received /%s", match.group(1).lower())
 
 
-def build_application(token, allowed_ids, stock):
+def build_application(token, allowed_ids, stock, access_mode="restricted", admin_ids=None):
+    if access_mode == "public" and not hasattr(stock, "for_user"):
+        raise ValueError("Public mode requires user-scoped PostgreSQL storage")
     application = (
         Application.builder().token(token)
         .concurrent_updates(False)
@@ -905,6 +1035,8 @@ def build_application(token, allowed_ids, stock):
     )
     application.bot_data["manager"] = stock
     application.bot_data["allowed_ids"] = allowed_ids
+    application.bot_data["access_mode"] = access_mode
+    application.bot_data["admin_ids"] = set(admin_ids or ())
     text_input = filters.TEXT & ~filters.COMMAND
 
     entry_points = [
@@ -968,7 +1100,11 @@ def build_application(token, allowed_ids, stock):
             per_message=False,
         )
     application.add_handler(TypeHandler(Update, log_incoming_command), group=-1)
+    application.add_handler(TypeHandler(Update, rate_limit_update), group=-2)
     application.add_handler(CommandHandler("myid", whoami))
+    application.add_handler(CommandHandler("deleteaccount", delete_account_start))
+    application.add_handler(CallbackQueryHandler(delete_account_callback, pattern=r"^account:"))
+    application.add_handler(CommandHandler("status", admin_status))
     application.add_handler(conversation)
     application.add_handler(CommandHandler("start", home))
     application.add_handler(CommandHandler("help", help_command))
@@ -976,7 +1112,7 @@ def build_application(token, allowed_ids, stock):
     application.add_handler(CommandHandler("summary", show_summary))
     application.add_handler(CommandHandler("low", show_low))
     application.add_handler(CommandHandler("cancel", cancel))
-    application.add_handler(CallbackQueryHandler(navigate, pattern=r"^(menu:|browse:|item:|search:again|delete:|add:|addcat:|addfield:|editfield:|editcat:|editconfirm:|flow:cancel)"))
+    application.add_handler(CallbackQueryHandler(navigate, pattern=r"^(menu:|browse:|item:|search:again|delete:|account:|add:|addcat:|addfield:|editfield:|editcat:|editconfirm:|flow:cancel)"))
     application.add_handler(MessageHandler(filters.COMMAND, unknown))
     application.add_handler(MessageHandler(text_input, unknown))
     application.add_error_handler(error_handler)
@@ -1007,26 +1143,53 @@ def main():
     )
     raw_low_stock_limit, low_source = resolve_config_value("LOW_STOCK_LIMIT", config, default="5")
     file_name, path_source = resolve_config_value("INVENTORY_DATA_PATH", config)
+    access_mode, access_source = resolve_config_value("BOT_ACCESS_MODE", config, default="restricted")
+    backend, backend_source = resolve_config_value("STORAGE_BACKEND", config, default="json")
+    database_url, _ = resolve_config_value("DATABASE_URL", config)
+    raw_admin_ids, admin_source = resolve_config_value("TELEGRAM_ADMIN_USER_IDS", config)
     if not token or token == "PASTE_YOUR_BOT_TOKEN_HERE":
         print("Missing TELEGRAM_BOT_TOKEN. Follow README.md to configure .env.")
         return 1
     try:
-        allowed_ids = parse_allowed_ids(raw_ids)
+        if access_mode not in {"public", "restricted"}:
+            raise ValueError("BOT_ACCESS_MODE must be public or restricted")
+        if backend not in {"json", "postgres"}:
+            raise ValueError("STORAGE_BACKEND must be json or postgres")
+        if access_mode == "public" and backend != "postgres":
+            raise ValueError("Public access requires PostgreSQL storage to keep each user's inventory private")
+        allowed_ids = parse_allowed_ids(raw_ids) if access_mode == "restricted" else set()
+        admin_ids = parse_allowed_ids(raw_admin_ids)
         low_stock_limit = int(raw_low_stock_limit)
         if low_stock_limit < 0:
             raise ValueError("LOW_STOCK_LIMIT must be zero or greater")
-        data_path = Path(file_name).expanduser() if file_name else DEFAULT_DATA
-        if not data_path.is_absolute():
-            data_path = BASE / data_path
-        stock = InventoryManager(InventoryStorage(data_path), low_stock_limit=low_stock_limit)
+        if backend == "postgres":
+            if not database_url:
+                raise ValueError("DATABASE_URL is required when STORAGE_BACKEND=postgres")
+            stock = PostgresInventoryManager(database_url, low_stock_limit=low_stock_limit)
+            if not stock.check_connection():
+                raise ValueError("PostgreSQL health check failed")
+        else:
+            data_path = Path(file_name).expanduser() if file_name else DEFAULT_DATA
+            if not data_path.is_absolute():
+                data_path = BASE / data_path
+            stock = InventoryManager(InventoryStorage(data_path), low_stock_limit=low_stock_limit)
     except (ValueError, DataFileError) as exc:
         print(f"Cannot start safely: {exc}")
         return 1
-    if not allowed_ids:
+    except Exception as exc:
+        LOG.error("Storage initialization failed (%s)", type(exc).__name__)
+        print("Cannot start safely: storage initialization failed. Check database setup and credentials privately.")
+        return 1
+    if access_mode == "restricted" and not allowed_ids:
         print("Access locked: TELEGRAM_ALLOWED_USER_IDS is empty. /myid remains available to unlock inventory.")
-    LOG.info("Loaded allowlist from %s (%d ID(s)); access is %s", id_source, len(allowed_ids), "locked" if not allowed_ids else "allowlisted")
-    LOG.info("Loaded low-stock limit from %s and inventory path from %s", low_source, path_source)
-    application = build_application(token, allowed_ids, stock)
+    LOG.info("Access mode loaded from %s: %s", access_source, access_mode)
+    if access_mode == "restricted":
+        LOG.info("Loaded allowlist from %s (%d ID(s))", id_source, len(allowed_ids))
+    LOG.info("Loaded storage backend from %s: %s", backend_source, backend)
+    LOG.info("Loaded low-stock limit from %s; admin IDs from %s (%d configured)", low_source, admin_source, len(admin_ids))
+    if backend == "json":
+        LOG.info("Loaded local inventory path from %s", path_source)
+    application = build_application(token, allowed_ids, stock, access_mode, admin_ids)
     print("Starting Telegram checks and polling. Press Ctrl+C to stop.")
     try:
         application.run_polling(drop_pending_updates=False, allowed_updates=["message", "callback_query"])

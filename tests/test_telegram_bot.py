@@ -28,6 +28,7 @@ def _fake_telegram_modules():
     telegram.InlineKeyboardMarkup = KeyboardMarkup
     telegram.Update = type("Update", (), {})
     ext = types.ModuleType("telegram.ext")
+    ext.ApplicationHandlerStop = type("ApplicationHandlerStop", (Exception,), {})
     ext.Application = type("Application", (), {})
     ext.CallbackQueryHandler = type("CallbackQueryHandler", (), {})
     ext.CommandHandler = type("CommandHandler", (), {})
@@ -75,7 +76,7 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.context = types.SimpleNamespace(
             application=types.SimpleNamespace(bot_data={"manager": self.manager, "allowed_ids": {123}}),
-            user_data={},
+            user_data={}, user_id=123,
         )
 
     def set_callback(self, data):
@@ -89,6 +90,91 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await telegram_bot.authorized(self.update, self.context))
         self.reply_text.assert_awaited_once()
         self.assertIn("Access denied", self.reply_text.await_args.args[0])
+
+    async def test_public_mode_onboards_verified_private_user_without_allowlist(self):
+        class Scoped:
+            def __init__(self):
+                self.created = 0
+            def ensure_account(self):
+                self.created += 1
+            def summary(self):
+                return {"total_products": 0, "total_units": 0, "inventory_value": "0.00", "low_stock_count": 0}
+
+        class Store:
+            def __init__(self):
+                self.accounts = {}
+            def for_user(self, user_id):
+                return self.accounts.setdefault(user_id, Scoped())
+
+        store = Store()
+        self.context.application.bot_data.update(manager=store, access_mode="public", allowed_ids=set())
+        await telegram_bot.home(self.update, self.context)
+        self.assertEqual(set(store.accounts), {123})
+        self.assertEqual(store.accounts[123].created, 1)
+        self.assertIn("private inventory", self.reply_text.await_args.args[0])
+
+    async def test_public_mode_still_rejects_group_updates(self):
+        self.context.application.bot_data.update(access_mode="public", allowed_ids=set())
+        self.chat.type = "group"
+        self.assertFalse(await telegram_bot.authorized(self.update, self.context))
+        self.assertIn("private chat", self.reply_text.await_args.args[0])
+
+    async def test_scoped_manager_uses_context_verified_telegram_user(self):
+        class Store:
+            def for_user(self, user_id):
+                return ("scoped", user_id)
+        self.context.application.bot_data["manager"] = Store()
+        self.assertEqual(telegram_bot.manager(self.context), ("scoped", 123))
+
+    async def test_public_application_refuses_shared_local_json_storage(self):
+        with self.assertRaisesRegex(ValueError, "user-scoped PostgreSQL"):
+            telegram_bot.build_application("placeholder", set(), self.manager, access_mode="public")
+
+    async def test_public_configuration_rejects_json_backend(self):
+        output = StringIO()
+        with patch.dict("os.environ", {
+            "TELEGRAM_BOT_TOKEN": "dummy-test-value",
+            "BOT_ACCESS_MODE": "public",
+            "STORAGE_BACKEND": "json",
+        }, clear=True), patch.object(telegram_bot, "load_env_file", return_value={}), \
+             contextlib.redirect_stdout(output):
+            result = telegram_bot.main()
+        self.assertEqual(result, 1)
+        self.assertIn("Public access requires PostgreSQL", output.getvalue())
+        self.assertNotIn("dummy-test-value", output.getvalue())
+
+    async def test_global_rate_limit_covers_each_user_update(self):
+        update = types.SimpleNamespace(update_id=None)
+        with patch.object(telegram_bot.time, "monotonic", return_value=100.0):
+            allowed = [telegram_bot._within_rate_limit(update, self.context, 123) for _ in range(61)]
+        self.assertEqual(sum(allowed), telegram_bot.RATE_LIMIT_PER_MINUTE)
+
+    async def test_public_delete_account_requires_matching_confirmation(self):
+        class Scoped:
+            def __init__(self):
+                self.deleted = 0
+                self.created = 0
+            def ensure_account(self):
+                self.created += 1
+            def delete_account(self):
+                self.deleted += 1
+                return True
+        class Store:
+            def __init__(self):
+                self.accounts = {}
+            def for_user(self, user_id):
+                return self.accounts.setdefault(user_id, Scoped())
+        store = Store()
+        self.context.application.bot_data.update(manager=store, access_mode="public")
+        self.context.user_data[telegram_bot.ACCOUNT_DELETE_KEY] = "one_nonce"
+        query = self.set_callback("account:delete:other_nonce")
+        await telegram_bot.delete_account_callback(self.update, self.context)
+        self.assertEqual(store.accounts, {})
+        query = self.set_callback("account:delete:one_nonce")
+        await telegram_bot.delete_account_callback(self.update, self.context)
+        self.assertEqual(store.accounts[123].deleted, 1)
+        self.assertEqual(store.accounts[123].created, 0)
+        self.assertIn("permanently deleted", query.message.reply_text.await_args.args[0])
 
     async def prepare_add_preview(self, category="Stationery"):
         await telegram_bot.add_start(self.update, self.context)

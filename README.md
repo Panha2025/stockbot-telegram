@@ -22,92 +22,29 @@
 **No downloads or `pip install` are required for the terminal application.**
 The low-stock threshold defaults to 5; configure another value with `python3 app.py --low-stock-limit 3`.
 
-## Telegram bot setup (optional interface)
+## Telegram bot setup
 
-Telegram uses the **same InventoryManager and JSON file** as the terminal application. The Telegram bot cannot work until you create a bot with Telegram and supply its token. It also needs internet access, and `telegram_bot.py` must stay running to respond to messages.
+The university CLI continues to use local JSON and needs no database. The Telegram bot has two separate configurations:
 
-### Step 1 — Create a bot in Telegram
+- **Local course/demo mode:** JSON storage and a restricted numeric allowlist. The bot must be running on your computer.
+- **Public hosted mode:** PostgreSQL storage and a private inventory per verified Telegram user. Use the Render worker and Supabase steps in [DEPLOYMENT.md](DEPLOYMENT.md).
 
-1. In Telegram, open the verified **@BotFather** account.
-2. Send `/newbot` and follow its instructions to pick a name and a username ending in `bot`.
-3. BotFather gives you a **secret API token**. Don't post it in chats, source code, a screenshot, or Canvas.
-
-### Step 2 — Install the Telegram library (Mac / VS Code)
-
-In VS Code's terminal, **inside this project folder**:
+Install the bot dependencies locally with:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -r requirements.txt
-```
-
-On Windows, activate the environment with `.venv\Scripts\activate` instead of `source ...`.
-
-### Step 3 — Configure your token
-
-Copy `.env.example` to `.env`:
-
-```bash
 cp .env.example .env
 ```
 
-Open `.env`, paste your secret after `TELEGRAM_BOT_TOKEN=` and leave `TELEGRAM_ALLOWED_USER_IDS=` empty at first.
+Set a fresh `TELEGRAM_BOT_TOKEN` privately in `.env` for local use. If a token has ever been exposed, revoke it through BotFather and use only its replacement. `.env` is ignored by Git. For local restricted mode, set `TELEGRAM_ALLOWED_USER_IDS` to numeric IDs separated by commas, then run `python telegram_bot.py`. `/myid` remains available while access is locked.
 
-Example structure (use a **real token privately**, not this placeholder):
+The public deployment uses `BOT_ACCESS_MODE=public`, `STORAGE_BACKEND=postgres`, a new bot token, and a least-privilege database URL stored only in Render secrets. It ignores the local JSON file and never uploads the university sample data. Every Telegram action, including callback product IDs, is scoped to Telegram's verified private-chat user ID. See the deployment guide for account setup, migration, recovery, monitoring, and plan costs.
 
-```ini
-TELEGRAM_BOT_TOKEN=PASTE_YOUR_BOT_TOKEN_HERE
-TELEGRAM_ALLOWED_USER_IDS=
-INVENTORY_DATA_PATH=
-LOW_STOCK_LIMIT=5
-```
+Supported features include `/start`, add, paginated view, search, update, confirmed delete, summary, low-stock alerts, and confirmed `/deleteaccount`. Group chats are rejected. The public service rate limits each user and caps an account at 500 products. Data remains until the user deletes their account or the database operator removes it.
 
-**Important:** `.env` is intentionally excluded from the ZIP and Git. Never submit real bot tokens.
-If a token was ever exposed, revoke/regenerate it privately through BotFather and replace the value in `.env` before starting the bot. This project does not print token values.
-
-### Step 4 — Find your Telegram ID (safe onboarding)
-
-Run:
-
-```bash
-python3 telegram_bot.py
-```
-
-The bot starts in **locked mode** when there are no allowed IDs. `/myid` is registered before the inventory conversation handler and does not use inventory authorization. Open `@SmallShopInventory221Bot` and send `/myid` in a private chat. It replies with your numeric Telegram user ID. You cannot see/change any inventory yet.
-
-At startup, the bot makes read-only `getMe` and `getWebhookInfo` checks and confirms that the token belongs to `@SmallShopInventory221Bot`. Non-empty process environment values override `.env`; blank exported values fall back to `.env`. Startup logs show the configuration source and allowlist count without printing IDs. If another webhook is configured, the bot stops without deleting it; review the current setup and remove that webhook yourself only if switching to polling. A second polling process is reported as a conflict. Pending updates are preserved at startup.
-
-Now:
-
-1. Stop the program with **Ctrl+C**.
-2. Change `.env` to `TELEGRAM_ALLOWED_USER_IDS=123456789` (replace with your actual ID).
-3. If multiple team members should access the inventory, use `123456789,987654321`.
-4. Start again: `python3 telegram_bot.py`.
-5. Send `/start` in your private Telegram bot chat and tap the buttons.
-
-### Step 5 — Test Telegram buttons and commands
-
-| Command/button | What it does |
-|---|---|
-| `/start` | Open the menu of buttons |
-| `/add` | Enter name, choose or type category, quantity, and price; review and confirm. IDs are generated automatically. |
-| `/list` | Browse five detailed product cards per page with View, Edit, and Delete buttons |
-| `/search pen` | Search by name, category, or ID; `/search` asks for a keyword. Results can be viewed, edited, or deleted. |
-| `/update` or `/edit` | Select a product from the list, choose a field, preview, then confirm |
-| `/delete` | Select a product and explicitly confirm or cancel deletion |
-| `/summary` | Product count, units, stock value, low/out-of-stock counts, and category breakdown |
-| `/low` | Products at or below the configured low-stock threshold, with stock update buttons |
-| `/cancel` | Cancel an unfinished form |
-| `/myid` | Show your own user ID; allowed even in locked mode |
-
-Set `LOW_STOCK_LIMIT` in `.env` to change the bot's low-stock threshold; it defaults to 5. The CLI accepts `--low-stock-limit N`.
-
-**Access control:** Only individual Telegram user IDs included in `TELEGRAM_ALLOWED_USER_IDS` may read or change products; groups are not supported. An empty allowlist denies inventory access. Anyone who knows your bot's public username can open it, but cannot access inventory without being on the allowlist. Keep tokens secret. Existing `.env` files using the older `TELEGRAM_ALLOWED_IDS` setting remain supported.
-
-The conversation combines text-message steps with inline-button callbacks. PTB's `per_message=False` warning is suppressed for this intentional setup; state remains scoped per user and private chat so the text steps and button responses stay in the same flow. Logs show command names and error classes only; they do not include message text, user IDs, or token values.
-
-**Do not run `app.py` and `telegram_bot.py` at the same time** against the same file. This student project uses local JSON storage and does not support simultaneous writers. Run one interface, close it, then use the other. Telegram changes are visible in the CLI on its next launch.
+Local JSON is designed for one writer at a time. The Telegram local mode and CLI should not run simultaneously against the same JSON file. The hosted bot uses a separate PostgreSQL database and does not share the CLI's sample data.
 
 ## What is in the ZIP?
 
@@ -115,8 +52,11 @@ The conversation combines text-message steps with inline-button callbacks. PTB's
 COSC221_Telegram_Inventory_Final/
 ├── app.py                 # required command-line menu
 ├── inventory.py           # Product and InventoryManager classes; validation
-├── storage.py             # robust JSON load / atomic save
+├── storage.py             # robust local JSON load / atomic save
 ├── telegram_bot.py        # optional Telegram bot menus and conversations
+├── postgres_storage.py    # owner-scoped PostgreSQL storage for public bot
+├── migrations/            # Supabase PostgreSQL schema and RLS
+├── render.yaml             # always-on background worker blueprint
 ├── bot_helpers.py         # message formatting and configuration helpers
 ├── requirements.txt       # only used by Telegram
 ├── .env.example           # safe configuration template (no real token)
@@ -167,7 +107,7 @@ This **replaces your current changes**. Back up `data/inventory.json` first if n
 ## Important limitations
 
 - Telegram is an **optional extension**, not the core assignment. The professor does not award automatic extra marks for extra interfaces; request instructor approval if necessary.
-- The bot cannot answer when your laptop/computer is off, the process is stopped, or its internet connection is down. No cloud deployment is included.
+- Local Telegram mode cannot answer when your laptop/computer is off. Hosted mode depends on Render, Supabase, Telegram, and network availability; it has no contractual uptime guarantee.
 - Local JSON is intended for one process at a time, not concurrent app/bot runs or multiple machines.
 - Data fields are for inventory only. Sales tracking, sign-in accounts, machine learning, and paid services are outside this assignment's scope.
 - **Testing disclosure:** Python CLI, storage, helpers and code syntax were tested offline. Live Telegram messaging still requires a personal token and connection and must be tested by your team.

@@ -84,6 +84,7 @@ def parse_callback_action(data):
         r"editconfirm:(?:save|cancel):[A-Za-z0-9_-]+",
         r"delete:(?:yes|no):P\d{3,}:[A-Za-z0-9_-]+",
         r"flow:cancel",
+        r"account:(?:delete|cancel):[A-Za-z0-9_-]+",
     )
     return data if any(re.fullmatch(pattern, data) for pattern in patterns) else None
 
