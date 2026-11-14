@@ -22,6 +22,10 @@ from webhook_runtime import PostgresBotPersistence
 
 
 LOG = logging.getLogger("stockbot.webhook")
+# HTTPX logs full request URLs at INFO, including Telegram bot tokens embedded
+# in Bot API paths. Keep those credentials out of hosted runtime logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 MAX_BODY_BYTES = 1_000_000
 WEBHOOK_PATH = "/api/telegram"
 

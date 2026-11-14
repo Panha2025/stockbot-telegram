@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from decimal import Decimal
 from io import BytesIO
 import json
+import logging
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -60,6 +61,10 @@ class MemoryStore:
 
 
 class WebhookHTTPTests(unittest.TestCase):
+    def test_http_client_logs_do_not_emit_token_bearing_request_urls(self):
+        self.assertGreaterEqual(logging.getLogger("httpx").getEffectiveLevel(), logging.WARNING)
+        self.assertGreaterEqual(logging.getLogger("httpcore").getEffectiveLevel(), logging.WARNING)
+
     def post(self, payload, secret="unit-secret"):
         request = object.__new__(webhook.handler)
         request.path = "/api/telegram"
