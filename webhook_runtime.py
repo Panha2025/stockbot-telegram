@@ -3,7 +3,7 @@
 from decimal import Decimal
 import json
 
-from telegram.ext import BasePersistence
+from telegram.ext import BasePersistence, PersistenceInput
 
 
 _DECIMAL_MARKER = "__stockbot_decimal__"
@@ -39,7 +39,12 @@ class PostgresBotPersistence(BasePersistence):
     """Persist one private Telegram account's PTB state in ``shop_users``."""
 
     def __init__(self, store, user_id):
-        super().__init__(update_interval=1)
+        # bot_data contains per-invocation runtime dependencies and security
+        # configuration (manager/access_mode). PTB replaces Application.bot_data
+        # with get_bot_data() during initialize() when bot_data persistence is
+        # enabled. We deliberately don't persist it so initialization cannot
+        # erase the public-mode setting or the scoped inventory manager.
+        super().__init__(store_data=PersistenceInput(bot_data=False), update_interval=1)
         self.store = store
         self.user_id = int(user_id)
 

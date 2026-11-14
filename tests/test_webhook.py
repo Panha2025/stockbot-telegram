@@ -7,6 +7,8 @@ import json
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from telegram.ext import Application
+
 from api import telegram as webhook
 from webhook_runtime import PostgresBotPersistence
 
@@ -115,6 +117,25 @@ class WebhookHTTPTests(unittest.TestCase):
 
 
 class PostgresPersistenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_persistence_initialization_preserves_runtime_bot_data(self):
+        store = MemoryStore()
+        persistence = PostgresBotPersistence(store, 123)
+        application = (
+            Application.builder()
+            .token("placeholder-for-test")
+            .persistence(persistence)
+            .build()
+        )
+        manager = object()
+        application.bot_data.update(manager=manager, access_mode="public", allowed_ids=set())
+
+        await application._initialize_persistence()
+
+        self.assertIs(application.bot_data["manager"], manager)
+        self.assertEqual(application.bot_data["access_mode"], "public")
+        self.assertEqual(application.bot_data["allowed_ids"], set())
+        self.assertFalse(persistence.store_data.bot_data)
+
     async def test_user_state_and_conversation_survive_new_persistence_instance(self):
         store = MemoryStore()
         first = PostgresBotPersistence(store, 123)
